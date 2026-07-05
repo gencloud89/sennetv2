@@ -1,0 +1,51 @@
+# ============================================================
+# Large binaries — không push lên git
+# ============================================================
+
+# APK gốc & extracted (dự án Android tham khảo)
+sennet.apk
+sennet_extracted/
+sennet_decompiled/
+
+# JDK portable (quá lớn)
+jadx/
+jdk/
+
+# Windows: original installer EXE
+sennetv1win/original/
+
+# Windows: extracted installer files (chứa binary lớn)
+sennetv1win/extracted/installer_full/
+
+# Windows: tools (7za, NSIS, JDK...)
+sennetv1win/tools/
+
+# Windows: output files (build products)
+sennetv1win/output/
+
+# Mac: tools (copy từ Windows)
+sennetv1mac/tools/
+
+# Node modules
+node_modules/
+**/node_modules/
+
+# ============================================================
+# Git LFS candidates (nếu cần sau này)
+# ============================================================
+# *.apk
+# *.exe
+# *.dll
+# *.pak
+# *.bin
+# *.dat
+# *.so
+
+# ============================================================
+# OS files
+# ============================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

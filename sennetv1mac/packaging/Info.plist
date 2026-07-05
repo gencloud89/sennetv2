@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>SENNET</string>
+	<key>CFBundleExecutable</key>
+	<string>SENNET</string>
+	<key>CFBundleIconFile</key>
+	<string>electron.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.senviet.vpn.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>SENNET</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>4.2.1</string>
+	<key>CFBundleVersion</key>
+	<string>4.2.1</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSRequiresAquaSystemAppearance</key>
+	<false/>
+	<!-- Network Extension (VPN) -->
+	<key>NEProviderClasses</key>
+	<dict>
+		<key>NETunnelProvider</key>
+		<string>SENNET</string>
+	</dict>
+	<!-- Allow outgoing connections -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<!-- File access -->
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>SENNET needs access to Documents for configuration files</string>
+	<!-- Apple Events (for system proxy) -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SENNET needs to configure system proxy settings</string>
+</dict>
+</plist>

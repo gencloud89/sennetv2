@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Allow JIT compilation (required for JavaScriptCore) -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- Allow unsigned executable memory (required for V8/Chromium) -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- Allow DYLD environment variables (for development) -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+
+	<!-- Network access (client) -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- Network access (server - for localhost sing-box API) -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+
+	<!-- Hardened Runtime -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!-- App Sandbox (tắt để VPN hoạt động) -->
+	<!-- VPN apps typically can't be sandboxed -->
+</dict>
+</plist>

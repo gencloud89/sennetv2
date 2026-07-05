@@ -1,0 +1,323 @@
+name: Build SENNET macOS
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'sennetv1mac/**'
+      - '.github/workflows/build-mac.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number'
+        required: false
+        default: '4.2.1'
+      architectures:
+        description: 'Architectures to build (space-separated: arm64 x64)'
+        required: false
+        default: 'arm64 x64'
+
+jobs:
+  # ============================================================
+  # Build Apple Silicon (M1/M2/M3/M4/M5)
+  # ============================================================
+  build-arm64:
+    name: Build macOS ARM64 (Apple Silicon)
+    runs-on: macos-latest
+    # macos-latest hiện là ARM64 (M-series)
+    # Nếu cần Intel, dùng macos-13
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set version
+        run: |
+          VERSION="${{ inputs.version || '4.2.1' }}"
+          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "Building SENNET v${VERSION} for macOS ARM64"
+
+      - name: Install ASAR tool
+        run: npm install -g @electron/asar
+
+      - name: Create .app bundle structure
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET.app"
+          mkdir -p "${APP_BUNDLE}/Contents/MacOS"
+          mkdir -p "${APP_BUNDLE}/Contents/Resources/extra/static/icons"
+          mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
+
+          # Pack app.asar từ source code
+          cd extracted/app_source
+          npx asar pack . "../../${APP_BUNDLE}/Contents/Resources/app.asar"
+          cd ../..
+
+          echo "app.asar size: $(wc -c < "${APP_BUNDLE}/Contents/Resources/app.asar") bytes"
+
+      - name: Copy packaging files
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET.app"
+
+          # Copy Info.plist
+          cp packaging/Info.plist "${APP_BUNDLE}/Contents/"
+
+          # Copy icons
+          if [ -f packaging/iconTemplate.png ]; then
+            cp packaging/iconTemplate.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate.png"
+          fi
+          if [ -f packaging/iconTemplate@2x.png ]; then
+            cp packaging/iconTemplate@2x.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate@2x.png"
+          fi
+
+          # Tạo electron.icns từ PNG nếu cần
+          if [ -f packaging/iconTemplate.png ]; then
+            mkdir -p /tmp/icon.iconset
+            sips -z 16 16 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_16x16.png 2>/dev/null || true
+            sips -z 32 32 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_32x32.png 2>/dev/null || true
+            sips -z 128 128 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_128x128.png 2>/dev/null || true
+            sips -z 256 256 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_256x256.png 2>/dev/null || true
+            sips -z 512 512 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_512x512.png 2>/dev/null || true
+            iconutil -c icns /tmp/icon.iconset -o "${APP_BUNDLE}/Contents/Resources/electron.icns" 2>/dev/null || true
+          fi
+
+      - name: Download Electron for macOS ARM64
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET.app"
+
+          # Tải Electron cho macOS ARM64
+          ELECTRON_VERSION="28.2.0"
+          ELECTRON_URL="https://github.com/electron/electron/releases/download/v${ELECTRON_VERSION}/electron-v${ELECTRON_VERSION}-darwin-arm64.zip"
+
+          echo "Downloading Electron ${ELECTRON_VERSION} for darwin-arm64..."
+          curl -L -o /tmp/electron-arm64.zip "${ELECTRON_URL}"
+
+          unzip -q /tmp/electron-arm64.zip -d /tmp/electron-arm64
+
+          # Copy Electron binary
+          cp /tmp/electron-arm64/Electron.app/Contents/MacOS/Electron "${APP_BUNDLE}/Contents/MacOS/SENNET"
+          chmod +x "${APP_BUNDLE}/Contents/MacOS/SENNET"
+
+          # Copy Frameworks
+          cp -r /tmp/electron-arm64/Electron.app/Contents/Frameworks/* "${APP_BUNDLE}/Contents/Frameworks/" 2>/dev/null || true
+
+      - name: Build sing-box for macOS ARM64
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET.app"
+
+          # Build sing-box từ source (nếu có)
+          if [ -d "../sing-box" ]; then
+            echo "Building sing-box from source..."
+            cd ../sing-box
+            CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -o ../sennetv1mac/bin/libcore-darwin-arm64 ./cmd/sing-box
+            cd ../sennetv1mac
+          fi
+
+          # Copy native binary nếu có
+          if [ -f "bin/libcore-darwin-arm64" ]; then
+            cp bin/libcore-darwin-arm64 "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+            cp bin/libcore-darwin-arm64 "${APP_BUNDLE}/Contents/Resources/extra/libcore_backup"
+            chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+            echo "libcore copied for ARM64"
+          else
+            echo "WARNING: libcore-darwin-arm64 not found — VPN core will not work"
+            echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
+          fi
+
+      - name: Create DMG
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET.app"
+          DMG_NAME="SENNET_v${APP_VERSION}_mac_arm64"
+
+          # Ad-hoc sign
+          codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
+
+          # Tạo DMG
+          hdiutil create -volname "SENNET" \
+            -srcfolder "${APP_BUNDLE}" \
+            -ov -format UDZO \
+            "output/${DMG_NAME}.dmg"
+
+          echo "DMG created: output/${DMG_NAME}.dmg"
+          ls -la "output/${DMG_NAME}.dmg"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: SENNET_macOS_ARM64
+          path: sennetv1mac/output/SENNET_v*_mac_arm64.dmg
+          retention-days: 30
+
+  # ============================================================
+  # Build Intel Mac
+  # ============================================================
+  build-x64:
+    name: Build macOS x64 (Intel)
+    runs-on: macos-13  # Intel Mac runner
+    # GH Actions macos-13 là Intel, macos-latest là ARM64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set version
+        run: |
+          VERSION="${{ inputs.version || '4.2.1' }}"
+          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "Building SENNET v${VERSION} for macOS Intel"
+
+      - name: Install ASAR tool
+        run: npm install -g @electron/asar
+
+      - name: Create .app bundle structure
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET_x64.app"
+          mkdir -p "${APP_BUNDLE}/Contents/MacOS"
+          mkdir -p "${APP_BUNDLE}/Contents/Resources/extra/static/icons"
+          mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
+
+          cd extracted/app_source
+          npx asar pack . "../../${APP_BUNDLE}/Contents/Resources/app.asar"
+          cd ../..
+
+      - name: Copy packaging files
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET_x64.app"
+          cp packaging/Info.plist "${APP_BUNDLE}/Contents/"
+          if [ -f packaging/iconTemplate.png ]; then
+            cp packaging/iconTemplate.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate.png"
+          fi
+          if [ -f packaging/iconTemplate@2x.png ]; then
+            cp packaging/iconTemplate@2x.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate@2x.png"
+          fi
+
+      - name: Download Electron for macOS x64
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET_x64.app"
+          ELECTRON_VERSION="28.2.0"
+          ELECTRON_URL="https://github.com/electron/electron/releases/download/v${ELECTRON_VERSION}/electron-v${ELECTRON_VERSION}-darwin-x64.zip"
+
+          curl -L -o /tmp/electron-x64.zip "${ELECTRON_URL}"
+          unzip -q /tmp/electron-x64.zip -d /tmp/electron-x64
+
+          cp /tmp/electron-x64/Electron.app/Contents/MacOS/Electron "${APP_BUNDLE}/Contents/MacOS/SENNET"
+          chmod +x "${APP_BUNDLE}/Contents/MacOS/SENNET"
+          cp -r /tmp/electron-x64/Electron.app/Contents/Frameworks/* "${APP_BUNDLE}/Contents/Frameworks/" 2>/dev/null || true
+
+      - name: Build sing-box for macOS x64
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET_x64.app"
+          if [ -d "../sing-box" ]; then
+            cd ../sing-box
+            CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -o ../sennetv1mac/bin/libcore-darwin-amd64 ./cmd/sing-box
+            cd ../sennetv1mac
+          fi
+          if [ -f "bin/libcore-darwin-amd64" ]; then
+            cp bin/libcore-darwin-amd64 "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+            chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+          fi
+
+      - name: Create DMG
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET_x64.app"
+          DMG_NAME="SENNET_v${APP_VERSION}_mac_x64"
+
+          codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
+
+          hdiutil create -volname "SENNET" \
+            -srcfolder "${APP_BUNDLE}" \
+            -ov -format UDZO \
+            "output/${DMG_NAME}.dmg"
+
+          ls -la "output/${DMG_NAME}.dmg"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: SENNET_macOS_x64
+          path: sennetv1mac/output/SENNET_v*_mac_x64.dmg
+          retention-days: 30
+
+  # ============================================================
+  # Build Universal Binary (kết hợp ARM64 + x64)
+  # ============================================================
+  build-universal:
+    name: Build macOS Universal (ARM64 + x64)
+    runs-on: macos-latest
+    needs: [build-arm64, build-x64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set version
+        run: |
+          VERSION="${{ inputs.version || '4.2.1' }}"
+          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Download ARM64 artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: SENNET_macOS_ARM64
+          path: /tmp/arm64_artifact
+
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: SENNET_macOS_x64
+          path: /tmp/x64_artifact
+
+      - name: Extract and combine
+        run: |
+          cd /tmp
+
+          # Mount ARM64 DMG
+          hdiutil attach /tmp/arm64_artifact/*.dmg -mountpoint /tmp/arm64_mnt
+          cp -r /tmp/arm64_mnt/SENNET.app /tmp/SENNET_universal.app
+          hdiutil detach /tmp/arm64_mnt
+
+          # Mount x64 DMG
+          hdiutil attach /tmp/x64_artifact/*.dmg -mountpoint /tmp/x64_mnt
+
+          # Tạo universal binary với lipo
+          lipo -create \
+            /tmp/arm64_mnt/SENNET.app/Contents/MacOS/SENNET \
+            /tmp/x64_mnt/SENNET.app/Contents/MacOS/SENNET \
+            -output /tmp/SENNET_universal.app/Contents/MacOS/SENNET
+
+          hdiutil detach /tmp/x64_mnt
+
+          # Tạo DMG universal
+          DMG_NAME="SENNET_v${APP_VERSION}_mac_universal"
+          hdiutil create -volname "SENNET" \
+            -srcfolder /tmp/SENNET_universal.app \
+            -ov -format UDZO \
+            "sennetv1mac/output/${DMG_NAME}.dmg"
+
+          ls -la "sennetv1mac/output/${DMG_NAME}.dmg"
+
+      - name: Upload Universal DMG
+        uses: actions/upload-artifact@v3
+        with:
+          name: SENNET_macOS_Universal
+          path: sennetv1mac/output/SENNET_v*_mac_universal.dmg
+          retention-days: 30
