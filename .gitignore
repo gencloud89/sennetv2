@@ -41,6 +41,16 @@ node_modules/
 # *.dat
 # *.so
 
+# Android SDK (quá lớn)
+android_sdk/
+
+# Temp/working files
+sennetv1win/output/nsis_*.bin
+sennetv1win/output/archive_*.7z
+sennetv1win/output/installer_work/
+sennetv1win/output/sennet_installer.nsi
+sennetv1mac/extracted/app.asar
+
 # ============================================================
 # OS files
 # ============================================================
