@@ -132,6 +132,48 @@ jobs:
             echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
           fi
 
+      - name: Strip unnecessary Electron files (giảm dung lượng)
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET.app"
+
+          echo "Before strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+
+          # Xóa SwiftShader — software GPU render, không cần trên Apple Silicon
+          rm -rf "${APP_BUNDLE}/Contents/Frameworks/"*SwiftShader* 2>/dev/null || true
+
+          # Xóa Vulkan ICD (không cần)
+          rm -f "${APP_BUNDLE}/Contents/Resources/"vk_swiftshader* 2>/dev/null || true
+
+          # Xóa unnecessary Electron helpers (chỉ giữ renderer + GPU + plugin)
+          for helper in "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/Helpers/"*.app; do
+            name=$(basename "$helper" .app)
+            case "$name" in
+              *"Helper (GPU)"*|*"Helper (Renderer)"*|*"Helper (Plugin)"*)
+                ;; # Giữ lại
+              *)
+                rm -rf "$helper" 2>/dev/null || true
+                echo "  Removed: $name"
+                ;;
+            esac
+          done
+
+          # Xóa Electron Framework dSYM debug symbols nếu có
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
+
+          # Xóa Resources không cần trong Electron Framework
+          rm -rf "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/Resources/"*.lproj 2>/dev/null || true
+          rm -rf "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/Resources/"*.icns 2>/dev/null || true
+
+          # Xóa Chromium Helper apps không cần thiết
+          for helper in "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/"*.app; do
+            if [ -d "$helper" ] && [ "$helper" != *"GPU"* ] && [ "$helper" != *"Renderer"* ]; then
+              rm -rf "$helper" 2>/dev/null || true
+            fi
+          done
+
+          echo "After strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+
       - name: Create DMG
         run: |
           cd sennetv1mac
@@ -141,10 +183,11 @@ jobs:
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # Tạo DMG
+          # Tạo DMG với UDBZ (bzip2 - nén tốt hơn zlib)
+          echo "Creating DMG with bzip2 compression..."
           hdiutil create -volname "SENNET" \
             -srcfolder "${APP_BUNDLE}" \
-            -ov -format UDZO \
+            -ov -format UDBZ \
             "output/${DMG_NAME}.dmg"
 
           echo "DMG created: output/${DMG_NAME}.dmg"
