@@ -145,32 +145,37 @@ jobs:
           # Xóa Vulkan ICD (không cần)
           rm -f "${APP_BUNDLE}/Contents/Resources/"vk_swiftshader* 2>/dev/null || true
 
-          # Xóa unnecessary Electron helpers (chỉ giữ renderer + GPU + plugin)
-          for helper in "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/Helpers/"*.app; do
-            name=$(basename "$helper" .app)
-            case "$name" in
-              *"Helper (GPU)"*|*"Helper (Renderer)"*|*"Helper (Plugin)"*)
-                ;; # Giữ lại
-              *)
-                rm -rf "$helper" 2>/dev/null || true
-                echo "  Removed: $name"
-                ;;
-            esac
-          done
+          # Xóa toàn bộ Electron Framework Resources (localized strings, PDFs, etc.)
+          # Giữ lại MainMenu.nib (cần cho app menu)
+          EF="${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework"
+          if [ -d "$EF/Resources" ]; then
+            find "$EF/Resources" -type f ! -name "*.nib" -delete 2>/dev/null || true
+            find "$EF/Resources" -type d -empty -delete 2>/dev/null || true
+          fi
 
-          # Xóa Electron Framework dSYM debug symbols nếu có
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
-
-          # Xóa Resources không cần trong Electron Framework
-          rm -rf "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/Resources/"*.lproj 2>/dev/null || true
-          rm -rf "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/Resources/"*.icns 2>/dev/null || true
-
-          # Xóa Chromium Helper apps không cần thiết
-          for helper in "${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework/"*.app; do
-            if [ -d "$helper" ] && [ "$helper" != *"GPU"* ] && [ "$helper" != *"Renderer"* ]; then
-              rm -rf "$helper" 2>/dev/null || true
+          # Xóa Chromium Helper apps (chỉ giữ GPU + Renderer)
+          for helper in "$EF/"*.app "$EF/Helpers/"*.app; do
+            if [ -d "$helper" ]; then
+              name=$(basename "$helper" .app)
+              case "$name" in
+                *"GPU"*|*"Renderer"*) ;; # Giữ lại
+                *) rm -rf "$helper" 2>/dev/null || true
+                   echo "  Removed Helper: $name" ;;
+              esac
             fi
-          done
+          done 2>/dev/null || true
+
+          # Xóa Debug, dSYM
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
+
+          # Xóa LICENSES, version files từ Frameworks
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "LICENSE*" -delete 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.version" -delete 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "Info.plist" -delete 2>/dev/null || true
+
+          # Xóa các thư mục trống sau khi dọn
+          find "${APP_BUNDLE}/Contents/Frameworks" -type d -empty -delete 2>/dev/null || true
 
           echo "After strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
@@ -179,16 +184,36 @@ jobs:
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
           DMG_NAME="SENNET_v${APP_VERSION}_mac_arm64"
+          TMP_DMG="/tmp/sennet_tmp.dmg"
 
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # Tạo DMG với UDBZ (bzip2 - nén tốt hơn zlib)
-          echo "Creating DMG with bzip2 compression..."
-          hdiutil create -volname "SENNET" \
-            -srcfolder "${APP_BUNDLE}" \
-            -ov -format UDBZ \
-            "output/${DMG_NAME}.dmg"
+          # Tạo DMG rỗng trước, copy thủ công + dùng ULFO (lzfse) — nén tốt nhất trên macOS
+          APP_SIZE=$(du -sk "${APP_BUNDLE}" | cut -f1)
+          DMG_SIZE=$((APP_SIZE + 50000))  # thêm 50MB buffer
+
+          echo "Creating ${DMG_NAME}.dmg (ULFO/lzfse compression)..."
+          hdiutil create -size ${DMG_SIZE}k -fs HFS+ -volname "SENNET" -attach "${TMP_DMG}"
+
+          # Tìm mount point
+          MOUNT_POINT=$(hdiutil info | grep "/Volumes/SENNET" | awk '{print $NF}')
+          if [ -z "$MOUNT_POINT" ]; then
+            MOUNT_POINT="/Volumes/SENNET"
+          fi
+
+          # Copy files vào DMG
+          cp -R "${APP_BUNDLE}" "${MOUNT_POINT}/" 2>/dev/null || true
+
+          # Tạo symlink đến /Applications (để user kéo thả)
+          ln -s /Applications "${MOUNT_POINT}/Applications" 2>/dev/null || true
+
+          # Unmount
+          hdiutil detach "${MOUNT_POINT}" -force 2>/dev/null || true
+
+          # Convert sang ULFO compressed read-only
+          hdiutil convert "${TMP_DMG}" -format ULFO -o "output/${DMG_NAME}.dmg"
+          rm -f "${TMP_DMG}"
 
           echo "DMG created: output/${DMG_NAME}.dmg"
           ls -la "output/${DMG_NAME}.dmg"
