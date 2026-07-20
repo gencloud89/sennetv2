@@ -68,7 +68,7 @@ jobs:
           # Copy Info.plist
           cp packaging/Info.plist "${APP_BUNDLE}/Contents/"
 
-          # Copy icons
+          # Copy tray icons (macOS menu bar — dùng icon template từ packaging)
           if [ -f packaging/iconTemplate.png ]; then
             cp packaging/iconTemplate.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate.png"
           fi
@@ -76,15 +76,23 @@ jobs:
             cp packaging/iconTemplate@2x.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate@2x.png"
           fi
 
-          # Tạo electron.icns từ PNG nếu cần
-          if [ -f packaging/iconTemplate.png ]; then
+          # Copy App icon (.icns) từ docs/logo/ — đây là logo chính thức giống Windows
+          # icon.icns đã được chuẩn bị sẵn với đầy đủ kích thước (16-512px)
+          if [ -f "../docs/logo/icon.icns" ]; then
+            cp "../docs/logo/icon.icns" "${APP_BUNDLE}/Contents/Resources/electron.icns"
+            echo "App icon copied from docs/logo/icon.icns"
+          elif [ -f "../docs/logo/icon.png" ]; then
+            # Fallback: tạo icns từ PNG (nếu chưa có icon.icns)
             mkdir -p /tmp/icon.iconset
-            sips -z 16 16 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_16x16.png 2>/dev/null || true
-            sips -z 32 32 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_32x32.png 2>/dev/null || true
-            sips -z 128 128 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_128x128.png 2>/dev/null || true
-            sips -z 256 256 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_256x256.png 2>/dev/null || true
-            sips -z 512 512 packaging/iconTemplate.png --out /tmp/icon.iconset/icon_512x512.png 2>/dev/null || true
+            sips -z 16 16 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_16x16.png 2>/dev/null || true
+            sips -z 32 32 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_32x32.png 2>/dev/null || true
+            sips -z 128 128 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_128x128.png 2>/dev/null || true
+            sips -z 256 256 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_256x256.png 2>/dev/null || true
+            sips -z 512 512 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_512x512.png 2>/dev/null || true
             iconutil -c icns /tmp/icon.iconset -o "${APP_BUNDLE}/Contents/Resources/electron.icns" 2>/dev/null || true
+            echo "App icon generated from docs/logo/icon.png (fallback)"
+          else
+            echo "WARNING: No app icon found in docs/logo/"
           fi
 
       - name: Download Electron for macOS ARM64
@@ -132,7 +140,7 @@ jobs:
             echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
           fi
 
-      - name: Strip unnecessary Electron files (giảm dung lượng)
+      - name: Strip unnecessary Electron files (giảm dung lượng, AN TOÀN)
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
@@ -140,32 +148,32 @@ jobs:
           echo "Before strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
           # Xóa SwiftShader — software GPU render, không cần trên Apple Silicon
+          # SwiftShader là thư viện render GPU bằng phần mềm, tiết kiệm ~30MB
           rm -rf "${APP_BUNDLE}/Contents/Frameworks/"*SwiftShader* 2>/dev/null || true
 
-          # Xóa Vulkan ICD (không cần)
+          # Xóa Vulkan ICD config (không cần)
           rm -f "${APP_BUNDLE}/Contents/Resources/"vk_swiftshader* 2>/dev/null || true
 
-          # Xóa toàn bộ Electron Framework Resources (localized strings, PDFs, etc.)
-          # Giữ lại MainMenu.nib (cần cho app menu)
+          # XÓA CÓ CHỌN LỌC: chỉ xóa locale .lproj không cần thiết
+          # Giữ lại en (English), zh_CN (Chinese Simplified), zh_TW (Chinese Traditional)
+          # KHÔNG xóa các file resource khác — framework cần chúng để hoạt động
           EF="${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework"
           if [ -d "$EF/Resources" ]; then
-            find "$EF/Resources" -type f ! -name "*.nib" -delete 2>/dev/null || true
-            find "$EF/Resources" -type d -empty -delete 2>/dev/null || true
+            for lproj in "$EF/Resources/"*.lproj; do
+              if [ -d "$lproj" ]; then
+                lang=$(basename "$lproj" .lproj)
+                case "$lang" in
+                  en|zh_CN|zh_TW) ;; # Giữ lại các locale cần thiết
+                  *)
+                    rm -rf "$lproj" 2>/dev/null || true
+                    echo "  Removed locale: $lang"
+                    ;;
+                esac
+              fi
+            done
           fi
 
-          # Xóa Chromium Helper apps không cần thiết (giữ GPU, Renderer, Plugin)
-          for helper in "$EF/"*.app "$EF/Helpers/"*.app; do
-            if [ -d "$helper" ]; then
-              name=$(basename "$helper" .app)
-              case "$name" in
-                *"GPU"*|*"Renderer"*|*"Plugin"*) ;; # Giữ lại
-                *) rm -rf "$helper" 2>/dev/null || true
-                   echo "  Removed Helper: $name" ;;
-              esac
-            fi
-          done 2>/dev/null || true
-
-          # Xóa Debug, dSYM
+          # Xóa Debug symbols, dSYM
           find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
           find "${APP_BUNDLE}/Contents/Frameworks" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
 
@@ -267,12 +275,34 @@ jobs:
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET_x64.app"
+
+          # Copy Info.plist
           cp packaging/Info.plist "${APP_BUNDLE}/Contents/"
+
+          # Copy tray icons (macOS menu bar — dùng icon template từ packaging)
           if [ -f packaging/iconTemplate.png ]; then
             cp packaging/iconTemplate.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate.png"
           fi
           if [ -f packaging/iconTemplate@2x.png ]; then
             cp packaging/iconTemplate@2x.png "${APP_BUNDLE}/Contents/Resources/extra/static/icons/enabledTemplate@2x.png"
+          fi
+
+          # Copy App icon (.icns) từ docs/logo/ — logo chính thức giống Windows
+          if [ -f "../docs/logo/icon.icns" ]; then
+            cp "../docs/logo/icon.icns" "${APP_BUNDLE}/Contents/Resources/electron.icns"
+            echo "App icon copied from docs/logo/icon.icns"
+          elif [ -f "../docs/logo/icon.png" ]; then
+            # Fallback: tạo icns từ PNG
+            mkdir -p /tmp/icon.iconset
+            sips -z 16 16 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_16x16.png 2>/dev/null || true
+            sips -z 32 32 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_32x32.png 2>/dev/null || true
+            sips -z 128 128 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_128x128.png 2>/dev/null || true
+            sips -z 256 256 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_256x256.png 2>/dev/null || true
+            sips -z 512 512 ../docs/logo/icon.png --out /tmp/icon.iconset/icon_512x512.png 2>/dev/null || true
+            iconutil -c icns /tmp/icon.iconset -o "${APP_BUNDLE}/Contents/Resources/electron.icns" 2>/dev/null || true
+            echo "App icon generated from docs/logo/icon.png (fallback)"
+          else
+            echo "WARNING: No app icon found in docs/logo/"
           fi
 
       - name: Download Electron for macOS x64
@@ -303,24 +333,37 @@ jobs:
             chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
           fi
 
-      - name: Strip unnecessary Electron files (giảm dung lượng)
+      - name: Strip unnecessary Electron files (giảm dung lượng, AN TOÀN)
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET_x64.app"
           echo "Before strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
-          # Xóa SwiftShader
+          # Xóa SwiftShader — software GPU render, tiết kiệm ~30MB
           rm -rf "${APP_BUNDLE}/Contents/Frameworks/"*SwiftShader* 2>/dev/null || true
+
+          # Xóa Vulkan ICD config (không cần)
           rm -f "${APP_BUNDLE}/Contents/Resources/"vk_swiftshader* 2>/dev/null || true
 
-          # Xóa Electron Framework Resources không cần thiết
+          # XÓA CÓ CHỌN LỌC: chỉ xóa locale .lproj không cần thiết
+          # Giữ lại en, zh_CN, zh_TW — KHÔNG xóa các file resource khác
           EF="${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework"
           if [ -d "$EF/Resources" ]; then
-            find "$EF/Resources" -type f ! -name "*.nib" -delete 2>/dev/null || true
-            find "$EF/Resources" -type d -empty -delete 2>/dev/null || true
+            for lproj in "$EF/Resources/"*.lproj; do
+              if [ -d "$lproj" ]; then
+                lang=$(basename "$lproj" .lproj)
+                case "$lang" in
+                  en|zh_CN|zh_TW) ;; # Giữ lại
+                  *)
+                    rm -rf "$lproj" 2>/dev/null || true
+                    echo "  Removed locale: $lang"
+                    ;;
+                esac
+              fi
+            done
           fi
 
-          # Xóa Debug, dSYM, LICENSES
+          # Xóa Debug symbols, dSYM, LICENSES
           find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
           find "${APP_BUNDLE}/Contents/Frameworks" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
           find "${APP_BUNDLE}/Contents/Frameworks" -name "LICENSE*" -delete 2>/dev/null || true
