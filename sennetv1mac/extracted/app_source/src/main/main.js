@@ -689,12 +689,18 @@ function initPowerMonitor() {
 function initProxyHelper() {
   return new Promise(function (_0x5647bb, _0x560c8f) {
     if (isMac) {
-      logger.info('help init.')
+      logger.info('help init (Mac).')
+      // Kiểm tra libcore tồn tại không — nếu không, vẫn cho app chạy (chỉ VPN không hoạt động)
+      if (!fs.existsSync(tun2socksPath)) {
+        logger.info('libcore not found at ' + tun2socksPath + ' — VPN core unavailable, app will run without VPN')
+        return _0x5647bb()
+      }
       fs.readFile(
         tun2socksToolPath,
         { encoding: 'utf-8' },
         function (_0xa2fd0b, _0x4a0d1f) {
           if (_0xa2fd0b) {
+            // libcore chưa có trong appConfigDir — copy từ Resources
             var _0xe6dae4 =
               ' cp ' +
               tun2socksPath +
@@ -712,9 +718,9 @@ function initProxyHelper() {
               { name: 'APP' },
               (_0x566aa0, _0x59c963, _0x3fe7d7) => {
                 return _0x566aa0 || _0x3fe7d7
-                  ? (logger.info('help init err 授權失敗.' + _0x566aa0),
-                    ProxyHelperAlert('授權失敗', 1),
-                    _0x560c8f(_0x566aa0))
+                  ? (logger.info('help init err 授權失敗 (sudo failed, VPN may not work): ' + (_0x566aa0 || _0x3fe7d7)),
+                    // VẪN resolve — cho app chạy tiếp, chỉ VPN không hoạt động
+                    _0x5647bb())
                   : (logger.info('help init success.'), _0x5647bb())
               }
             )
