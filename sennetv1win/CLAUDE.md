@@ -89,9 +89,44 @@ App mở → host.php → Lấy server list ["backbptd2.htb991.space", "backaptd
 | v4 | Update dialog fix + version 4.2.1 | ⚠️ Chưa triệt để |
 | v5 | Version consistency fix | ❌ Sót app.js |
 | v6 | **Phát hiện app dùng fetch()** + fetch interceptor | ✅ Nhưng login detection sai pattern |
-| **v7** | **Fix triệt để: fetch interceptor + auto-detect token + mirror retry** | ✅ Device 1102 |
+| v7 | **Fix triệt để: fetch interceptor + auto-detect token + mirror retry** | ✅ Device 1102 |
+| v8 | **NSIS installer chuẩn + tối ưu kích thước** | ❌ Crash: missing electron-updater |
+| **v9** | **Fix crash electron-updater → stub + rebuild NSIS** | ✅ Stable |
 
-## Files Modified (v7 — current)
+## Size Optimization (v8 → v9)
+
+| Thành phần | Trước | Sau | Đã xóa |
+|------------|-------|-----|--------|
+| app.asar | 81 MB | **28 MB** | font-spider cache (45MB), rxjs (7MB), underscore (1.6MB), electron-updater (0.8MB) |
+| Installer EXE | 97 MB | **76 MB** | NSIS LZMA compression |
+| Portable ZIP | 127 MB | **98 MB** | deflate compression |
+
+### Đã xóa khỏi node_modules (không dùng runtime):
+- `.font-spider/` — cache font gốc (45MB)
+- `rxjs` — chỉ dùng cho dev (7MB)
+- `underscore` — không dùng trong main process (1.6MB)
+- `electron-updater` — đã disable, thay bằng stub (0.8MB)
+- `electron-notarize` — chỉ cho Mac code signing (0.2MB)
+
+## Files Modified (v9 — current)
+
+### `src/main/main.js` — QUAN TRỌNG: electron-updater stub
+```javascript
+// KHÔNG require('electron-updater') nữa — module đã bị xóa
+// Thay bằng stub object:
+const autoUpdater = {
+  autoDownload: false,
+  checkForUpdates: function () { console.log('[Update] Disabled'); return Promise.resolve(null); },
+  checkForUpdatesAndNotify: function () { return Promise.resolve(null); },
+  downloadUpdate: function () { return Promise.resolve(null); },
+  quitAndInstall: function () {},
+  on: function () { return this; },
+  once: function () { return this; },
+  removeListener: function () { return this; }
+};
+```
+> **Cảnh báo**: Nếu thêm module mới vào node_modules, phải đảm bảo module đó tồn tại.
+> Nếu xóa module khỏi node_modules, phải kiểm tra `require()` trong `src/main/main.js`.
 
 ### `assets/js/mirror-bootstrap.js` — File quan trọng nhất
 Chứa TOÀN BỘ logic custom. Các chức năng:
@@ -131,17 +166,12 @@ Chứa TOÀN BỘ logic custom. Các chức năng:
 - Safe mode: chỉ dùng DOM manipulation
 
 ### `assets/js/app.js`
-- Sửa version string `2.1.7` → `4.2.1` (trong string array của obfuscated code)
+- Sửa version string `2.1.7` → `4.2.1` (trong string array của obfuscated code, vị trí 144539)
 
 ### `package.json`
 - Version `4.2.1`
 
-### `src/main/main.js`
-- `sendUpdateMessage()` → no-op
-- `autoUpdater.checkForUpdates` → no-op
-- Tất cả autoUpdater event handlers → console.log only
-
-## Build Workflow (v7)
+## Build Workflow (v9)
 
 ### Extract
 ```bash
@@ -162,17 +192,28 @@ npx asar pack extracted/app_source/ extracted/installer_full/resources/app.asar
 # 3. Build portable ZIP
 tools/7za/7za.exe a -tzip -mx5 output/SENNET_vN_portable.zip "extracted/installer_full/*"
 
-# 4. Build installer EXE (TỪ PORTABLE, không từ original nữa!)
-#    Tạo SFX self-extracting archive từ portable folder:
-cd extracted/installer_full
-../../tools/7za/7za.exe a -sfx -mx5 ../../output/SENNET_vN_installer.exe *
+# 4. Build NSIS installer (dùng makensis từ tools/nsis/)
+cd output
+../tools/nsis/nsis-3.10/makensis.exe sennet_installer.nsi
+# Output: SENNET_vN_installer.exe (NSIS Modern UI, có wizard + uninstall)
 ```
+
+### NSIS Installer Script
+File: `output/sennet_installer.nsi`
+- Dùng Modern UI (MUI2) — welcome page, chọn thư mục, progress, finish
+- Cài vào `$PROGRAMFILES\SENNET`
+- Tạo Start Menu + Desktop shortcuts
+- Registry để hiện trong Add/Remove Programs
+- Uninstaller đầy đủ (xóa file + shortcuts + registry)
 
 ### Verify ASAR Content
 ```bash
 # Extract toàn bộ ASAR để verify
 npx asar extract extracted/installer_full/resources/app.asar /tmp/verify/
-# Kiểm tra các file đã sửa
+# Kiểm tra các file đã sửa:
+# - assets/js/mirror-bootstrap.js (36497 bytes)
+# - assets/js/app.js (153494 bytes, version 4.2.1)
+# - src/main/main.js (có electron-updater stub)
 ```
 
 ## Test HWID Flow
