@@ -487,19 +487,37 @@
         }
 
         // Intercept login response để phát hiện login thành công
+        // Hỗ trợ cả 2 pattern: /passport/auth/login (Android) và /api/v1/app/applogin (Windows/Mac)
+        // Windows/Mac app trả token ở top-level: {token: "..."}
+        // Android app trả token trong data: {data: {auth_data: "...", token: "..."}}
         axios.interceptors.response.use(
             function (response) {
-                // Phát hiện login thành công (cả auth/login và token2Login)
-                if (response.config && response.config.url &&
-                    (response.config.url.indexOf('/passport/auth/login') !== -1 ||
-                     response.config.url.indexOf('/passport/auth/token2Login') !== -1) &&
-                    response.data && response.data.data && response.data.data.auth_data) {
+                // Phát hiện login thành công — hỗ trợ cả Android và Windows/Mac path
+                var isLoginUrl = response.config && response.config.url && (
+                    response.config.url.indexOf('/passport/auth/login') !== -1 ||
+                    response.config.url.indexOf('/passport/auth/token2Login') !== -1 ||
+                    response.config.url.indexOf('/api/v1/app/applogin') !== -1
+                );
 
-                    console.log('[MirrorBootstrap] Login detected — will report device to panel');
+                // Lấy auth_data hoặc token từ response (hỗ trợ cả 2 cấu trúc)
+                var authData = null;
+                var token = null;
+                if (response.data) {
+                    // Windows/Mac: token ở top-level
+                    authData = response.data.auth_data || null;
+                    token = response.data.token || null;
+                    // Android: token và auth_data trong data.data
+                    if (response.data.data) {
+                        authData = authData || response.data.data.auth_data;
+                        token = token || response.data.data.token;
+                    }
+                }
+
+                if (isLoginUrl && (authData || token)) {
+                    console.log('[MirrorBootstrap] Login detected (axios) — will report device to panel');
 
                     // Đợi 2 giây cho app khởi tạo xong, sau đó gọi subscribe
                     setTimeout(function () {
-                        var authData = response.data.data.auth_data;
                         var panelUrl = getCurrentPanelUrl();
                         if (!panelUrl) {
                             // Thử lấy từ URL của request login
@@ -520,10 +538,9 @@
                         console.log('[MirrorBootstrap]   URL:', subscribeUrl);
 
                         // Gọi subscribe với x-hwid header để ghi device
-                        // Thêm token từ auth_data response nếu có
                         var params = '';
-                        if (response.data.data.token) {
-                            params = '?token=' + encodeURIComponent(response.data.data.token);
+                        if (token) {
+                            params = '?token=' + encodeURIComponent(token);
                         }
 
                         axios.get(subscribeUrl + params, {
@@ -535,6 +552,11 @@
                         }).then(function (res) {
                             console.log('[MirrorBootstrap] Device reported successfully to panel!');
                             console.log('[MirrorBootstrap] Check v2_user_device table for new device');
+                            // Clear periodic retry timer sau khi thành công
+                            if (_reportRetryTimer) {
+                                clearInterval(_reportRetryTimer);
+                                _reportRetryTimer = null;
+                            }
                         }).catch(function (err) {
                             console.error('[MirrorBootstrap] Device report failed:', err.message);
                             // Retry sau 5 giây
@@ -641,8 +663,11 @@
             init._mirrorRetryCount = retryCount;
             var maxRetries = PANEL_DOMAINS.length;
 
-            // Gọi fetch gốc
-            return _origFetch.apply(this, arguments).then(function (response) {
+            // Gọi fetch gốc — DÙNG call(this, input, init) thay vì apply(this, arguments)
+            // Vì trong strict mode, arguments KHÔNG được cập nhật khi gán lại init
+            // Nếu app gọi fetch(url) không có init, arguments chỉ có 1 phần tử
+            // → init đã sửa (có headers x-hwid) sẽ bị MẤT nếu dùng apply(this, arguments)
+            return _origFetch.call(this, input, init).then(function (response) {
                 // Phát hiện authentication thành công — tìm token trong response
                 if (!_deviceReported && response.ok && url && url.indexOf('http') === 0) {
                     var cloned = response.clone();
@@ -666,14 +691,16 @@
                 // === MIRROR DOMAIN RETRY ===
                 // Nếu request thất bại (network error, timeout) và chưa hết retry
                 // → thử lại với mirror domain tiếp theo
-                var isNetworkError = !error.response &&
-                    (error.code === 'ECONNABORTED' ||
-                     error.code === 'ERR_NETWORK' ||
-                     error.code === 'ERR_CONNECTION_REFUSED' ||
-                     error.code === 'ERR_TIMED_OUT' ||
-                     (error.message || '').indexOf('Network Error') !== -1 ||
-                     (error.message || '').indexOf('timeout') !== -1 ||
-                     (error.message || '').indexOf('Failed to fetch') !== -1);
+                // LƯU Ý: fetch errors là TypeError/DOMException, KHÔNG có .code như axios
+                //   - Network error: TypeError "Failed to fetch"
+                //   - Timeout: DOMException "The operation was aborted." (name=AbortError/TimeoutError)
+                var isNetworkError = (
+                    (error.message || '').indexOf('Failed to fetch') !== -1 ||
+                    (error.message || '').indexOf('Network Error') !== -1 ||
+                    (error.message || '').indexOf('timeout') !== -1 ||
+                    (error.name === 'AbortError') ||
+                    (error.name === 'TimeoutError')
+                );
 
                 if (isNetworkError && retryCount < maxRetries && _isPanelRequest(originalUrl)) {
                     retryCount++;
@@ -755,6 +782,11 @@
                 if (xhr.status >= 200 && xhr.status < 300) {
                     console.log('[MirrorBootstrap] ✅ Device reported SUCCESSFULLY!');
                     console.log('[MirrorBootstrap] Check v2_user_device table for new device with HWID:', hwid);
+                    // Clear periodic retry timer sau khi thành công (không cần retry nữa)
+                    if (_reportRetryTimer) {
+                        clearInterval(_reportRetryTimer);
+                        _reportRetryTimer = null;
+                    }
                 } else {
                     console.error('[MirrorBootstrap] ❌ Device report FAILED — HTTP ' + xhr.status);
                     // Retry sau 10 giây
