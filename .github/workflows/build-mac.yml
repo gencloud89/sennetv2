@@ -177,10 +177,11 @@ jobs:
           find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
           find "${APP_BUNDLE}/Contents/Frameworks" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
 
-          # Xóa LICENSES, version files từ Frameworks
+          # Xóa LICENSES, version files (không xóa Info.plist trong .framework!)
           find "${APP_BUNDLE}/Contents/Frameworks" -name "LICENSE*" -delete 2>/dev/null || true
           find "${APP_BUNDLE}/Contents/Frameworks" -name "*.version" -delete 2>/dev/null || true
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "Info.plist" -delete 2>/dev/null || true
+          # Xóa Info.plist chỉ ở thư mục không phải .framework bundle
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "Info.plist" -not -path "*\.framework/*" -delete 2>/dev/null || true
 
           # Xóa các thư mục trống sau khi dọn
           find "${APP_BUNDLE}/Contents/Frameworks" -type d -empty -delete 2>/dev/null || true
