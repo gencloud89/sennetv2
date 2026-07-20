@@ -194,29 +194,42 @@ jobs:
 
           echo ">>> FINAL: $((S7/1024))MB (saved $(((S0-S7)/1024))MB total)"
 
-      - name: Create DMG (UDBZ bzip2 — nén mạnh nhất)
+      - name: Package — DMG + 7z nén cực đại
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
-          DMG_NAME="SENNET_v${APP_VERSION}_mac_arm64"
+          V="${APP_VERSION}"
+          ARM64_DMG="SENNET_v${V}_mac_arm64.dmg"
+          ARM64_7Z="SENNET_v${V}_mac_arm64.7z"
 
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # Dùng UDBZ (bzip2) cho tỉ lệ nén cao nhất
-          echo "Creating DMG with UDBZ compression..."
+          # 1. Tạo DMG (UDBZ — cho Mac thuần)
+          echo "--- Creating DMG (UDBZ) ---"
           hdiutil create -volname "SENNET" \
             -srcfolder "${APP_BUNDLE}" \
             -ov -format UDBZ \
-            "output/${DMG_NAME}.dmg"
+            "output/${ARM64_DMG}"
+          ls -la "output/${ARM64_DMG}"
 
-          echo "DMG: $(ls -la "output/${DMG_NAME}.dmg" | awk '{print $5}') bytes"
+          # 2. Tạo 7z (LZMA2 — nén mạnh hơn nhiều, dùng cho người muốn file nhỏ)
+          echo "--- Creating 7z (LZMA2 ultra) ---"
+          brew install p7zip 2>/dev/null || true
+          if command -v 7z &>/dev/null; then
+            7z a -mx9 -md=256m -mfb=273 -ms=on "output/${ARM64_7Z}" "${APP_BUNDLE}"
+            ls -la "output/${ARM64_7Z}"
+          else
+            echo "7z not available, skipping"
+          fi
 
-      - name: Upload DMG artifact
+      - name: Upload DMG + 7z artifacts
         uses: actions/upload-artifact@v4
         with:
           name: SENNET_macOS_ARM64
-          path: sennetv1mac/output/SENNET_v*_mac_arm64.dmg
+          path: |
+            sennetv1mac/output/SENNET_v*_mac_arm64.dmg
+            sennetv1mac/output/SENNET_v*_mac_arm64.7z
           retention-days: 30
 
   # ============================================================
