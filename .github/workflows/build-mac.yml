@@ -140,59 +140,37 @@ jobs:
             echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
           fi
 
-      - name: Strip MAX — giảm tối đa dung lượng Mac DMG
+      - name: Strip Electron — AN TOÀN, không phá hủy app bundle
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
           FW="${APP_BUNDLE}/Contents/Frameworks"
-          RES="${APP_BUNDLE}/Contents/Resources"
 
           S0=$(du -sk "${APP_BUNDLE}" | cut -f1)
           echo ">>> START: $((S0/1024))MB"
 
-          # === 1. SwiftShader (GPU phần mềm) — Apple Silicon không cần ===
-          find "${FW}" \( -name "SwiftShader" -o -name "*swiftshader*" -o -name "libvk_swiftshader*" \) -exec rm -rf {} + 2>/dev/null || true
-          S1=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -SwiftShader: $((S0/1024))MB -> $((S1/1024))MB (saved $(((S0-S1)/1024))MB)"
+          # 1. SwiftShader — software GPU renderer (Apple Silicon có GPU hardware)
+          find "${FW}" \( -name "SwiftShader" -type d -o -name "*swiftshader*" -o -name "libvk_swiftshader*" \) -exec rm -rf {} + 2>/dev/null || true
+          rm -f "${APP_BUNDLE}/Contents/Resources/vk_swiftshader"* 2>/dev/null || true
+          S1=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -SwiftShader: $(((S0-S1)/1024))MB saved"
 
-          # === 2. XÓA TẤT CẢ locale — CHỈ giữ English ===
+          # 2. Locales — chỉ giữ English
           find "${APP_BUNDLE}/Contents" -name "*.lproj" -type d | while read lproj; do
             lang=$(basename "$lproj" .lproj)
             case "$lang" in en|English) ;; *) rm -rf "$lproj" 2>/dev/null ;; esac
           done
-          S2=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Locales: $((S1/1024))MB -> $((S2/1024))MB (saved $(((S1-S2)/1024))MB)"
+          S2=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Locales: $(((S1-S2)/1024))MB saved"
 
-          # === 3. ffmpeg.dll + icudtl.dat — VPN app không cần media, giảm ~40MB ===
-          rm -f "${FW}/"*ffmpeg* "${FW}/"*icudtl* 2>/dev/null || true
-          S3=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -ffmpeg/icudtl: $((S2/1024))MB -> $((S3/1024))MB (saved $(((S2-S3)/1024))MB)"
+          # 3. Debug symbols, dSYM, LICENSES, version files
+          find "${FW}" \( -name "*.dSYM" -o -name "Debug" -type d -o -name "LICENSE*" -o -name "*.version" \) -exec rm -rf {} + 2>/dev/null || true
+          # Xóa Info.plist ngoài .framework bundles
+          find "${FW}" -name "Info.plist" -not -path "*\.framework/*" -delete 2>/dev/null || true
+          S3=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Debug/Licenses: $(((S2-S3)/1024))MB saved"
 
-          # === 4. Chromium resources: PDF viewer, speech, printing (~15MB) ===
-          find "${RES}" \( -name "*pdf*" -o -name "*speech*" -o -name "*print*" -o -name "*crashpad*" \) -exec rm -rf {} + 2>/dev/null || true
-          S4=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -ChromiumRes: $((S3/1024))MB -> $((S4/1024))MB (saved $(((S3-S4)/1024))MB)"
-
-          # === 5. Xóa Squirrel.framework (auto-update — đã disable) ===
-          rm -rf "${FW}/Squirrel.framework" 2>/dev/null || true
-          S5=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Squirrel: $((S4/1024))MB -> $((S5/1024))MB (saved $(((S4-S5)/1024))MB)"
-
-          # === 6. Xóa Helper apps ngoại trừ GPU + Renderer (tối thiểu cho Chromium) ===
-          for helper in "${FW}/Electron Framework.framework/"*.app "${FW}/Electron Framework.framework/Helpers/"*.app "${FW}/"*.app; do
-            [ -d "$helper" ] || continue
-            name=$(basename "$helper" .app)
-            case "$name" in
-              *"GPU"*|*"Renderer"*) ;; # Giữ lại — Chromium cần
-              *) rm -rf "$helper"; echo "  -Helper: $name" ;;
-            esac
-          done 2>/dev/null || true
-          S6=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Helpers: $((S5/1024))MB -> $((S6/1024))MB (saved $(((S5-S6)/1024))MB)"
-
-          # === 7. Debug, dSYM, LICENSES, .version, Info.plist rác ===
-          find "${FW}" \( -name "*.dSYM" -o -name "Debug" -o -name "LICENSE*" -o -name "*.version" \) -exec rm -rf {} + 2>/dev/null || true
-          find "${FW}" -name "Info.plist" -not -path "*\.framework/Versions/*/Resources/*" -delete 2>/dev/null || true
-          S7=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Debug/Licenses: $((S6/1024))MB -> $((S7/1024))MB (saved $(((S6-S7)/1024))MB)"
-
-          # === 8. Dọn thư mục trống ===
+          # 4. Dọn thư mục trống
           find "${APP_BUNDLE}/Contents" -type d -empty -delete 2>/dev/null || true
 
-          echo ">>> FINAL: $((S7/1024))MB (saved $(((S0-S7)/1024))MB total)"
+          echo ">>> FINAL: $((S3/1024))MB (total saved: $(((S0-S3)/1024))MB)"
 
       - name: Package — DMG + 7z nén cực đại
         run: |
