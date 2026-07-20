@@ -233,6 +233,12 @@ jobs:
       - name: Install ASAR tool
         run: npm install -g @electron/asar
 
+      - name: Install npm dependencies (CẦN cho app hoạt động)
+        run: |
+          cd sennetv1mac/extracted/app_source
+          npm install --production 2>&1 || true
+          echo "node_modules size: $(du -sh node_modules | cut -f1)"
+
       - name: Create .app bundle structure
         run: |
           cd sennetv1mac
@@ -241,6 +247,7 @@ jobs:
           mkdir -p "${APP_BUNDLE}/Contents/Resources/extra/static/icons"
           mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
 
+          # Pack app.asar từ source code (bao gồm node_modules vừa cài)
           cd extracted/app_source
           npx asar pack . "../../${APP_BUNDLE}/Contents/Resources/app.asar"
           cd ../..

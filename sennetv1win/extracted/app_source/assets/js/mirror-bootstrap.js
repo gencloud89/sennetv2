@@ -1,24 +1,49 @@
 /**
  * mirror-bootstrap.js — Domain Mirror + HWID Fix cho SENNET VPN macOS
  * ==================================================================
+ * VERSION: v9-DEBUG (2026-07-21)
+ * - Bọc TOÀN BỘ fetch interceptor trong try-catch
+ * - Fallback về _origFetch nếu có lỗi JavaScript
+ * - Console.log ở MỖI bước để xác định chính xác dòng gây lỗi
+ * - Global unhandledrejection handler
+ * - Debug log array window.__mirrorDebugLog
+ *
  * Chức năng:
  *   1. Domain panel & subscribe mirror (china-mirror-guide.md)
  *   2. Axios interceptors: retry với mirror domain khi request thất bại
  *   3. HWID Generator: tự động tạo hardware ID và gửi qua x-hwid header
- *      → Panel v2board nhận HWID qua subscribe (ClientController@subscribe)
- *      → Header: x-hwid → device được ghi vào v2_user_device table
  *   4. Tải domain-backup-config.json từ panel
  *   5. White screen fix: error handler + Vue mount monitor
- *
- * CƠ CHẾ HWID (đã phân tích từ code panel trên VPS):
- *   - AuthController::login KHÔNG nhận HWID (chỉ email + password)
- *   - ClientController::subscribe đọc header "x-hwid" để ghi device
- *   - UserDeviceService::reportDevice ghi device vào v2_user_device
- *   - Device info gồm: hwid, device_name, platform, user_agent, ip
  * ==================================================================
  */
 (function () {
     'use strict';
+
+    // ============================================================
+    // DEBUG: Global error capture
+    // ============================================================
+    window.__mirrorDebugLog = [];
+    var _MAX_DEBUG_LOG = 200;
+
+    function _debugLog(msg) {
+        var entry = '[MirrorDebug ' + new Date().toISOString() + '] ' + msg;
+        console.log(entry);
+        // Lưu vào array để inspect qua DevTools
+        try {
+            window.__mirrorDebugLog.push(entry);
+            if (window.__mirrorDebugLog.length > _MAX_DEBUG_LOG) {
+                window.__mirrorDebugLog.shift();
+            }
+        } catch (e) {}
+    }
+
+    // Bắt unhandled Promise rejections
+    window.addEventListener('unhandledrejection', function (e) {
+        _debugLog('UNHANDLED REJECTION: ' + (e.reason ? (e.reason.message || e.reason) : 'unknown'));
+        if (e.reason && e.reason.stack) {
+            _debugLog('  Stack: ' + e.reason.stack.substring(0, 200));
+        }
+    });
 
     // ============================================================
     // CONSTANTS
@@ -90,7 +115,6 @@
 
     // ============================================================
     // HWID GENERATOR — Tạo Hardware ID duy nhất cho thiết bị
-    // HWID format: WIN-{hostname}-{hash} (max 128 chars)
     // ============================================================
 
     function generateHWID() {
@@ -99,12 +123,14 @@
         try {
             // Sử dụng Node.js os module (có sẵn trong Electron)
             var os = require('os');
+            _debugLog('generateHWID: require(os) OK');
             var hostname = os.hostname();
             var platform = os.platform();
             var arch = os.arch();
             parts.push(hostname);
             parts.push(platform);
             parts.push(arch);
+            _debugLog('generateHWID: hostname=' + hostname + ' platform=' + platform + ' arch=' + arch);
 
             // Lấy MAC address đầu tiên (không phải internal)
             var nets = os.networkInterfaces();
@@ -128,6 +154,7 @@
             }
         } catch (e) {
             // Node.js os không có sẵn (fallback cho môi trường browser)
+            _debugLog('generateHWID: require(os) FAILED — ' + e.message + ' — using navigator fallback');
             parts.push(navigator.userAgent || 'unknown');
             parts.push(navigator.platform || 'unknown');
             parts.push(navigator.hardwareConcurrency || '1');
@@ -143,8 +170,6 @@
             hash |= 0;
         }
 
-        // Format: MAC-XXXXXXXX (ngắn gọn, dễ đọc trong panel)
-        // Panel normalizeHwid cắt 128 chars nên ta giữ format ngắn
         var h = Math.abs(hash).toString(16).toUpperCase();
         while (h.length < 8) h = '0' + h;
         var shortHost = (parts[0] || 'UNKNOWN').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8).toUpperCase();
@@ -164,7 +189,7 @@
             localStorage.setItem(STORAGE_KEY_HWID, hwid);
         } catch (e) {}
 
-        console.log('[MirrorBootstrap] Generated HWID:', hwid);
+        _debugLog('getOrCreateHWID: ' + hwid);
         return hwid;
     }
 
@@ -180,11 +205,12 @@
             var os = require('os');
             return {
                 device_name: os.hostname() || 'Mac',
-                platform: os.platform() + ' ' + os.arch(),  // darwin arm64
+                platform: os.platform() + ' ' + os.arch(),
                 user_agent: navigator.userAgent || 'macos.v2board.app 2.0',
                 os_release: os.release()
             };
         } catch (e) {
+            _debugLog('getDeviceMetadata: require(os) FAILED — ' + e.message + ' — using fallback');
             return {
                 device_name: 'Mac',
                 platform: 'darwin',
@@ -228,17 +254,6 @@
     // ============================================================
     // AXIOS INTERCEPTORS — Domain Mirror + x-hwid Header
     // ============================================================
-    // CƠ CHẾ GỬI HWID ĐÚNG (theo code panel trên VPS):
-    //   1. Thêm header "x-hwid" vào MỌI request axios
-    //   2. Panel ClientController::subscribe đọc header này
-    //   3. Device được ghi vào v2_user_device với:
-    //      - hwid = "sub-{sha256(user_id|header_hwid)[:40]}"
-    //      - node_type = "subscription"
-    //      - status = "subscription_seen"
-    //
-    // LƯU Ý: AuthController::login KHÔNG nhận HWID trong body,
-    //        nên việc inject hwid vào login data là vô ích.
-    //        Cách đúng là gửi qua HTTP header.
 
     function setupAxiosInterceptors() {
         if (typeof axios === 'undefined') {
@@ -246,27 +261,23 @@
             return;
         }
 
-        // REQUEST Interceptor: Thêm x-hwid header + lưu URL gốc cho retry
+        _debugLog('setupAxiosInterceptors: axios found, installing interceptors');
+
         axios.interceptors.request.use(
             function (config) {
-                // Lưu URL gốc để retry với mirror domain
                 config._originalUrl = config.url;
                 config._retryCount = config._retryCount || 0;
                 config._maxRetries = PANEL_DOMAINS.length;
 
-                // Đảm bảo headers object tồn tại
                 if (!config.headers) {
                     config.headers = {};
                 }
 
-                // Thêm x-hwid header vào MỌI request đến panel
-                // Panel đọc header này trong ClientController::subscribe
                 var hwid = getOrCreateHWID();
                 if (hwid && !config.headers['x-hwid']) {
                     config.headers['x-hwid'] = hwid;
                 }
 
-                // Thêm X-Device-Name để panel hiển thị tên thiết bị rõ ràng
                 var meta = getDeviceMetadata();
                 if (meta.device_name && !config.headers['X-Device-Name']) {
                     config.headers['X-Device-Name'] = meta.device_name;
@@ -275,39 +286,22 @@
                     config.headers['X-Device-Platform'] = meta.platform;
                 }
 
-                // Log cho request đến panel API
-                if (config.url && (
-                    config.url.indexOf('/api/v1/') !== -1 ||
-                    config.url.indexOf('/client/subscribe') !== -1 ||
-                    config.url.indexOf('/passport/auth/login') !== -1
-                )) {
-                    console.log('[MirrorBootstrap] Request:', config.method || 'GET', config.url,
-                        '| HWID header:', config.headers['x-hwid'] ? 'YES' : 'NO');
-                }
-
                 return config;
             },
             function (error) { return Promise.reject(error); }
         );
 
-        // RESPONSE Interceptor: Chặn update dialog + Retry với mirror domain
         axios.interceptors.response.use(
             function (response) {
-                // Log subscribe response để xác nhận HWID đã được ghi nhận
                 if (response.config && response.config.url &&
                     response.config.url.indexOf('/client/subscribe') !== -1) {
-                    console.log('[MirrorBootstrap] Subscribe OK — device should be recorded in panel');
+                    _debugLog('Axios: Subscribe OK');
                 }
 
-                // ===== CHẶN UPDATE DIALOG =====
-                // Khi app gọi /app/getVersion, panel trả về windows_version="4.2.1"
-                // App so sánh với version nội bộ (4.2.1) → hiện dialog "New version found"
-                // Fix: Ghi đè response để version luôn khớp → không hiện update dialog
                 if (response.config && response.config.url &&
                     response.config.url.indexOf('/app/getVersion') !== -1 &&
                     response.data && response.data.data) {
-                    console.log('[MirrorBootstrap] Intercepted getVersion — forcing same version to disable update dialog');
-                    // Gán tất cả version về "4.2.1" để app không thấy có update
+                    _debugLog('Axios: Intercepted getVersion — forcing version');
                     response.data.data.windows_version = '4.2.1';
                     response.data.data.macos_version = '4.2.1';
                     response.data.data.android_version = '2.1.6';
@@ -315,7 +309,6 @@
                     response.data.data.macos_download_url = '';
                     response.data.data.android_download_url = '';
                 }
-                // ===== END CHẶN UPDATE DIALOG =====
 
                 return response;
             },
@@ -350,7 +343,7 @@
                     config.url = replaceHost(originalUrl, extractHost(mirrorDomain));
                 }
                 config.timeout = (config.timeout || 10000) + 5000;
-                console.log('[MirrorBootstrap] Retry with mirror:', config.url);
+                _debugLog('Axios: Retry with mirror: ' + config.url);
                 return axios(config);
             }
         );
@@ -379,7 +372,7 @@
     window._mirrorBootstrapLoaded = true;
 
     window.addEventListener('error', function (e) {
-        console.error('[MirrorBootstrap] Global error:', e.message, e.filename, e.lineno);
+        _debugLog('Global error: ' + e.message + ' ' + e.filename + ':' + e.lineno);
     });
 
     var vueCheckAttempts = 0;
@@ -388,29 +381,22 @@
         var app = document.getElementById('app');
         var container = document.querySelector('.Container, .newsignPage, .newHome');
         if ((app && app.innerHTML && app.innerHTML.length > 50) || container) {
-            console.log('[MirrorBootstrap] Vue app mounted OK');
+            _debugLog('Vue app mounted OK (attempt ' + vueCheckAttempts + ')');
             return;
         }
         if (vueCheckAttempts < 30) {
             setTimeout(checkVueMounted, 1000);
         } else {
-            console.warn('[MirrorBootstrap] Vue may not have mounted after 30s');
+            _debugLog('Vue may not have mounted after 30s — possible white screen');
         }
     }
 
     // ============================================================
     // LAST-RESORT UPDATE DIALOG BLOCKER
     // ============================================================
-    // Nếu update dialog vẫn hiện sau tất cả các biện pháp trên,
-    // dùng CSS + MutationObserver để ẩn nó khỏi DOM
 
     function blockUpdateDialog() {
-        // CSS để ẩn update dialog — dùng !important để ghi đè mọi style
-        // FIX: KHÔNG dùng [class*="update"] vì sẽ ẩn nhầm các UI element hợp lệ
-        //      (vd: status update, form update button, v.v.)
-        //      Chỉ ẩn các class dialog/modal cụ thể liên quan đến update
         var css = '\
-            /* Ẩn dialog chứa class update-dialog hoặc version-dialog */ \
             .update-dialog, \
             .version-dialog, \
             .modal-update, \
@@ -422,7 +408,6 @@
                 z-index: -9999 !important; \
                 opacity: 0 !important; \
             } \
-            /* Ẩn overlay/mask của dialog (chỉ ẩn khi dialog update bị ẩn) */ \
             .v-modal:has(+ .update-dialog), \
             .el-overlay:has(+ .el-message-box__wrapper.update-available) { \
                 display: none !important; \
@@ -433,22 +418,15 @@
         style.textContent = css;
         document.head.appendChild(style);
 
-        // MutationObserver — quét và ẩn dialog update xuất hiện sau này
-        // FIX: KHÔNG dùng characterData:true (gây quét toàn bộ DOM khi Vue render text)
-        // FIX: KHÔNG dùng querySelectorAll('*') (quá chậm khi DOM lớn)
-        // FIX: Debounce 500ms để tránh quét liên tục trong lúc Vue render
-        // FIX: KHÔNG gọi el.remove() để tránh observer tự kích hoạt lại (infinite loop)
         var _observerDebounceTimer = null;
         var _observerDebounceMs = 500;
 
         var observer = new MutationObserver(function (mutations) {
-            // Debounce: chỉ quét sau khi DOM ngừng thay đổi 500ms
             if (_observerDebounceTimer) {
                 clearTimeout(_observerDebounceTimer);
             }
             _observerDebounceTimer = setTimeout(function () {
                 _observerDebounceTimer = null;
-                // Chỉ tìm các element dialog/modal cụ thể (không quét toàn bộ DOM)
                 var dialogElements = document.querySelectorAll(
                     '.el-message-box, .el-dialog, .el-message, .el-notification, ' +
                     '[class*="dialog"], [class*="modal"], [class*="popup"], ' +
@@ -456,20 +434,17 @@
                 );
                 for (var i = 0; i < dialogElements.length; i++) {
                     var el = dialogElements[i];
-                    // Bỏ qua nếu element đã bị ẩn hoặc xóa
                     if (!el.isConnected || el.style.display === 'none') continue;
 
                     var text = (el.textContent || '').toLowerCase();
 
-                    // Phát hiện dialog update qua text
                     if (text.indexOf('new version') !== -1 ||
                         text.indexOf('new version found') !== -1 ||
                         text.indexOf('cập nhật') !== -1 ||
                         text.indexOf('phiên bản mới') !== -1 ||
                         text.indexOf('đã có bản cập nhật') !== -1) {
 
-                        console.log('[MirrorBootstrap] Hiding update dialog:', el.className || el.tagName);
-                        // Ẩn thay vì xóa để tránh infinite loop
+                        _debugLog('Hiding update dialog: ' + (el.className || el.tagName));
                         el.style.setProperty('display', 'none', 'important');
                         el.style.setProperty('visibility', 'hidden', 'important');
                         el.setAttribute('data-mirror-hidden', 'true');
@@ -478,7 +453,6 @@
             }, _observerDebounceMs);
         });
 
-        // Bắt đầu observe khi DOM sẵn sàng — CHỈ observe childList (KHÔNG characterData)
         if (document.body) {
             observer.observe(document.body, { childList: true, subtree: true });
         } else {
@@ -486,44 +460,35 @@
                 observer.observe(document.body, { childList: true, subtree: true });
             });
         }
-
-        console.log('[MirrorBootstrap] Update dialog blocker installed (CSS + MutationObserver)');
     }
 
     // ============================================================
     // INIT
     // ============================================================
 
-    // === TỰ ĐỘNG GỬI DEVICE REPORT SAU KHI LOGIN ===
-    // Theo dõi login thành công → gọi subscribe với x-hwid header
-    // để panel ghi nhận device vào v2_user_device table
+    var _deviceReported = false;
+    var _reportRetryTimer = null;
+    var _lastToken = null;
+
     function watchForLoginAndReportDevice() {
         if (typeof axios === 'undefined') {
             setTimeout(watchForLoginAndReportDevice, 200);
             return;
         }
 
-        // Intercept login response để phát hiện login thành công
-        // Hỗ trợ cả 2 pattern: /passport/auth/login (Android) và /api/v1/app/applogin (Windows/Mac)
-        // Windows/Mac app trả token ở top-level: {token: "..."}
-        // Android app trả token trong data: {data: {auth_data: "...", token: "..."}}
         axios.interceptors.response.use(
             function (response) {
-                // Phát hiện login thành công — hỗ trợ cả Android và Windows/Mac path
                 var isLoginUrl = response.config && response.config.url && (
                     response.config.url.indexOf('/passport/auth/login') !== -1 ||
                     response.config.url.indexOf('/passport/auth/token2Login') !== -1 ||
                     response.config.url.indexOf('/api/v1/app/applogin') !== -1
                 );
 
-                // Lấy auth_data hoặc token từ response (hỗ trợ cả 2 cấu trúc)
                 var authData = null;
                 var token = null;
                 if (response.data) {
-                    // Windows/Mac: token ở top-level
                     authData = response.data.auth_data || null;
                     token = response.data.token || null;
-                    // Android: token và auth_data trong data.data
                     if (response.data.data) {
                         authData = authData || response.data.data.auth_data;
                         token = token || response.data.data.token;
@@ -531,30 +496,23 @@
                 }
 
                 if (isLoginUrl && (authData || token)) {
-                    console.log('[MirrorBootstrap] Login detected (axios) — will report device to panel');
+                    _debugLog('Login detected via axios — will report device');
 
-                    // Đợi 2 giây cho app khởi tạo xong, sau đó gọi subscribe
                     setTimeout(function () {
                         var panelUrl = getCurrentPanelUrl();
                         if (!panelUrl) {
-                            // Thử lấy từ URL của request login
                             var loginUrl = response.config.url;
                             var match = loginUrl.match(/^(https?:\/\/[^\/]+)/);
                             if (match) panelUrl = match[1];
                         }
                         if (!panelUrl) {
-                            console.log('[MirrorBootstrap] No panel URL — skipping device report');
+                            _debugLog('No panel URL — skipping device report');
                             return;
                         }
 
                         var subscribeUrl = panelUrl.replace(/\/+$/, '') + '/api/v1/client/subscribe';
                         var hwid = getOrCreateHWID();
 
-                        console.log('[MirrorBootstrap] Reporting device to panel...');
-                        console.log('[MirrorBootstrap]   HWID:', hwid);
-                        console.log('[MirrorBootstrap]   URL:', subscribeUrl);
-
-                        // Gọi subscribe với x-hwid header để ghi device
                         var params = '';
                         if (token) {
                             params = '?token=' + encodeURIComponent(token);
@@ -567,25 +525,21 @@
                             },
                             timeout: 15000
                         }).then(function (res) {
-                            console.log('[MirrorBootstrap] Device reported successfully to panel!');
-                            console.log('[MirrorBootstrap] Check v2_user_device table for new device');
-                            // Clear periodic retry timer sau khi thành công
+                            _debugLog('Device reported via axios OK');
                             if (_reportRetryTimer) {
                                 clearInterval(_reportRetryTimer);
                                 _reportRetryTimer = null;
                             }
                         }).catch(function (err) {
-                            console.error('[MirrorBootstrap] Device report failed:', err.message);
-                            // Retry sau 5 giây
+                            _debugLog('Device report via axios failed: ' + err.message);
                             setTimeout(function () {
-                                console.log('[MirrorBootstrap] Retrying device report...');
                                 axios.get(subscribeUrl + params, {
                                     headers: { 'x-hwid': hwid },
                                     timeout: 15000
                                 }).then(function () {
-                                    console.log('[MirrorBootstrap] Device report retry OK');
+                                    _debugLog('Device report retry OK');
                                 }).catch(function () {
-                                    console.error('[MirrorBootstrap] Device report retry also failed');
+                                    _debugLog('Device report retry also failed');
                                 });
                             }, 5000);
                         });
@@ -598,41 +552,45 @@
     }
 
     // ============================================================
-    // FETCH INTERCEPTOR — App dùng fetch() cho API calls (KHÔNG phải axios!)
+    // FETCH INTERCEPTOR — *** DEBUG VERSION v9 ***
     // ============================================================
-    // KEY FINDING: app.js sử dụng fetch() 29 lần, axios chỉ dùng cho localhost:9790.
-    // App login qua /api/v1/app/applogin (KHÔNG phải /passport/auth/login).
-    // App KHÔNG tự gọi subscribe → phải tự động gọi sau khi detect login.
+    // Thay đổi so với v8:
+    //   1. Bọc TOÀN BỘ code synchronous trong try-catch
+    //   2. Nếu lỗi → fallback gọi _origFetch trực tiếp
+    //   3. Console.log ở MỖI bước với request ID
+    //   4. try-catch trong response handler
+    //   5. try-catch trong error handler
+    //   6. Global unhandledrejection listener
+    // ============================================================
 
-    var _deviceReported = false;   // Tránh gọi subscribe nhiều lần
-    var _reportRetryTimer = null;  // Timer cho periodic retry
-    var _lastToken = null;         // Lưu token để retry
-
-    // Hàm helper để thêm header vào fetch init
+    // Hàm helper để thêm header vào fetch init — BỌC TRY-CATCH
     function _setFetchHeader(headers, key, value) {
-        if (headers instanceof Headers) {
-            if (!headers.has(key)) headers.set(key, value);
-        } else if (Array.isArray(headers)) {
-            var exists = false;
-            for (var i = 0; i < headers.length; i++) {
-                if ((headers[i][0] || '').toLowerCase() === key.toLowerCase()) {
-                    exists = true; break;
+        try {
+            if (headers instanceof Headers) {
+                if (!headers.has(key)) headers.set(key, value);
+            } else if (Array.isArray(headers)) {
+                var exists = false;
+                for (var i = 0; i < headers.length; i++) {
+                    if ((headers[i][0] || '').toLowerCase() === key.toLowerCase()) {
+                        exists = true; break;
+                    }
                 }
+                if (!exists) headers.push([key, value]);
+            } else {
+                var found = false;
+                for (var k in headers) {
+                    if (k.toLowerCase() === key.toLowerCase()) { found = true; break; }
+                }
+                if (!found) headers[key] = value;
             }
-            if (!exists) headers.push([key, value]);
-        } else {
-            var found = false;
-            for (var k in headers) {
-                if (k.toLowerCase() === key.toLowerCase()) { found = true; break; }
-            }
-            if (!found) headers[key] = value;
+        } catch (e) {
+            _debugLog('_setFetchHeader ERROR: ' + e.message + ' for key=' + key);
         }
     }
 
     // Hàm helper: kiểm tra URL có thuộc panel domain không
     function _isPanelRequest(url) {
         if (!url || url.indexOf('http') !== 0) return false;
-        // Lấy tất cả panel hosts để kiểm tra
         var allHosts = [];
         for (var i = 0; i < PANEL_DOMAINS.length; i++) {
             allHosts.push(extractHost(PANEL_DOMAINS[i]));
@@ -641,108 +599,16 @@
         for (var j = 0; j < allHosts.length; j++) {
             if (requestHost === allHosts[j]) return true;
         }
-        // Cũng kiểm tra nếu là subscribe host
         for (var k = 0; k < SUBSCRIBE_HOSTS.length; k++) {
             if (requestHost === SUBSCRIBE_HOSTS[k]) return true;
         }
         return false;
     }
 
-    function setupFetchInterceptor() {
-        if (typeof fetch === 'undefined') {
-            setTimeout(setupFetchInterceptor, 100);
-            return;
-        }
-
-        var _origFetch = window.fetch;
-
-        window.fetch = function (input, init) {
-            var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-            var originalUrl = url;
-
-            // Đảm bảo init và headers tồn tại
-            if (!init) init = {};
-            if (!init.headers) init.headers = {};
-
-            // Thêm x-hwid header vào MỌI request HTTP
-            var hwid = getOrCreateHWID();
-            var meta = getDeviceMetadata();
-
-            if (hwid && url && url.indexOf('http') === 0) {
-                _setFetchHeader(init.headers, 'x-hwid', hwid);
-                _setFetchHeader(init.headers, 'X-Device-Name', meta.device_name);
-                _setFetchHeader(init.headers, 'X-Device-Platform', meta.platform);
-            }
-
-            // Mirror retry tracking
-            var retryCount = init._mirrorRetryCount || 0;
-            init._mirrorRetryCount = retryCount;
-            var maxRetries = PANEL_DOMAINS.length;
-
-            // Gọi fetch gốc
-            return _origFetch.call(this, input, init).then(function (response) {
-                // === PHÁT HIỆN LOGIN ===
-                // Chỉ kiểm tra URL pattern — KHÔNG clone/scan response body
-                var isLoginUrl = url && (
-                    url.indexOf('/applogin') !== -1 ||
-                    url.indexOf('/passport/auth/login') !== -1 ||
-                    url.indexOf('/passport/auth/token2Login') !== -1
-                );
-                if (!_deviceReported && response.ok && isLoginUrl) {
-                    console.log('[MirrorBootstrap] Login URL detected — will report device');
-                    response.clone().text().then(function (text) {
-                        try {
-                            var data = JSON.parse(text);
-                            var token = (data && data.data && data.data.token) || data.token || null;
-                            if (token && token.length > 5) {
-                                _lastToken = token;
-                                var match = url.match(/^(https?:\/\/[^\/]+)/);
-                                var serverBase = match ? match[1] : url;
-                                triggerDeviceReport(serverBase, token, hwid);
-                            }
-                        } catch (e) {}
-                    }).catch(function () {});
-                }
-
-                return response;
-            }, function (error) {
-                // === MIRROR DOMAIN RETRY (đơn giản) ===
-                var isNetworkError = (
-                    (error.message || '').indexOf('Failed to fetch') !== -1 ||
-                    (error.message || '').indexOf('Network Error') !== -1 ||
-                    (error.name === 'AbortError') ||
-                    (error.name === 'TimeoutError')
-                );
-
-                if (isNetworkError && retryCount < maxRetries && _isPanelRequest(originalUrl)) {
-                    retryCount++;
-                    var nextDomainIndex = retryCount % PANEL_DOMAINS.length;
-                    var mirrorDomain = PANEL_DOMAINS[nextDomainIndex];
-                    var newUrl = replaceHost(originalUrl, extractHost(mirrorDomain));
-
-                    var newInit = {};
-                    for (var k in init) {
-                        if (init.hasOwnProperty(k)) newInit[k] = init[k];
-                    }
-                    newInit._mirrorRetryCount = retryCount;
-                    delete newInit.signal;
-
-                    console.log('[MirrorBootstrap] Retry #' + retryCount + ' with mirror:', newUrl);
-                    return window.fetch(newInputFromUrl(newUrl, input), newInit);
-                }
-
-                return Promise.reject(error);
-            });
-        };
-
-        console.log('[MirrorBootstrap] Fetch interceptor: x-hwid headers + login detect + mirror retry');
-    }
-
-    // Helper: tạo input mới từ URL đã thay đổi (giữ nguyên cấu trúc input gốc)
+    // Helper: tạo input mới từ URL đã thay đổi
     function newInputFromUrl(newUrl, originalInput) {
         if (typeof originalInput === 'string') return newUrl;
         if (originalInput && originalInput.url) {
-            // Là Request object → tạo lại
             try {
                 var req = new Request(newUrl, originalInput);
                 return req;
@@ -756,28 +622,15 @@
     // Gọi subscribe API để ghi device
     function triggerDeviceReport(serverBase, token, hwid) {
         if (_deviceReported) return;
-        _deviceReported = true; // Đánh dấu ngay để tránh duplicate
+        _deviceReported = true;
 
         var subscribeUrl = serverBase.replace(/\/+$/, '') + '/api/v1/client/subscribe';
         var params = '?token=' + encodeURIComponent(token);
         var meta = getDeviceMetadata();
 
-        console.log('[MirrorBootstrap] === DEVICE REPORT ===');
-        console.log('[MirrorBootstrap]   HWID:', hwid);
-        console.log('[MirrorBootstrap]   Token:', token.substring(0, 10) + '...');
-        console.log('[MirrorBootstrap]   Subscribe URL:', subscribeUrl);
-        console.log('[MirrorBootstrap]   Device:', meta.device_name, '|', meta.platform);
-
-        var reqHeaders = {
-            'x-hwid': hwid,
-            'X-Device-Name': meta.device_name,
-            'X-Device-Platform': meta.platform,
-            'User-Agent': navigator.userAgent || 'macos.v2board.app 2.0'
-        };
+        _debugLog('DEVICE REPORT: HWID=' + hwid + ' URL=' + subscribeUrl);
 
         var doReport = function () {
-            // Dùng fetch gốc (_origFetch từ closure không truy cập được ở đây)
-            // → Tạo XMLHttpRequest thủ công để tránh recursive fetch interceptor
             var xhr = new XMLHttpRequest();
             xhr.open('GET', subscribeUrl + params, true);
             xhr.setRequestHeader('x-hwid', hwid);
@@ -788,38 +641,32 @@
 
             xhr.onload = function () {
                 if (xhr.status >= 200 && xhr.status < 300) {
-                    console.log('[MirrorBootstrap] ✅ Device reported SUCCESSFULLY!');
-                    console.log('[MirrorBootstrap] Check v2_user_device table for new device with HWID:', hwid);
-                    // Clear periodic retry timer sau khi thành công (không cần retry nữa)
+                    _debugLog('Device reported SUCCESSFULLY');
                     if (_reportRetryTimer) {
                         clearInterval(_reportRetryTimer);
                         _reportRetryTimer = null;
                     }
                 } else {
-                    console.error('[MirrorBootstrap] ❌ Device report FAILED — HTTP ' + xhr.status);
-                    // Retry sau 10 giây
+                    _debugLog('Device report FAILED — HTTP ' + xhr.status);
                     _deviceReported = false;
                     setTimeout(function () {
-                        console.log('[MirrorBootstrap] Retrying device report...');
                         triggerDeviceReport(serverBase, token, hwid);
                     }, 10000);
                 }
             };
 
             xhr.onerror = function () {
-                console.error('[MirrorBootstrap] ❌ Device report NETWORK ERROR');
+                _debugLog('Device report NETWORK ERROR');
                 _deviceReported = false;
                 setTimeout(function () {
-                    console.log('[MirrorBootstrap] Retrying device report (after error)...');
                     triggerDeviceReport(serverBase, token, hwid);
                 }, 10000);
             };
 
             xhr.ontimeout = function () {
-                console.error('[MirrorBootstrap] ❌ Device report TIMEOUT');
+                _debugLog('Device report TIMEOUT');
                 _deviceReported = false;
                 setTimeout(function () {
-                    console.log('[MirrorBootstrap] Retrying device report (after timeout)...');
                     triggerDeviceReport(serverBase, token, hwid);
                 }, 10000);
             };
@@ -829,55 +676,295 @@
 
         doReport();
 
-        // Periodic retry mỗi 30 giây nếu chưa thành công
         if (_reportRetryTimer) clearInterval(_reportRetryTimer);
         _reportRetryTimer = setInterval(function () {
             if (!_deviceReported && _lastToken) {
-                console.log('[MirrorBootstrap] Periodic retry device report...');
+                _debugLog('Periodic retry device report...');
                 _deviceReported = true;
                 doReport();
             }
         }, 30000);
     }
 
+    // ============================================================
+    // *** CORE FIX: setupFetchInterceptor with TRY-CATCH ***
+    // ============================================================
+    var _origFetch = null;  // Lưu ở scope ngoài để fallback có thể truy cập
+    var _fetchReqId = 0;    // Global request counter
+
+    function setupFetchInterceptor() {
+        _debugLog('setupFetchInterceptor: START');
+        if (typeof fetch === 'undefined') {
+            _debugLog('setupFetchInterceptor: fetch undefined, retry in 100ms');
+            setTimeout(setupFetchInterceptor, 100);
+            return;
+        }
+
+        _origFetch = window.fetch;
+        _debugLog('setupFetchInterceptor: _origFetch saved, type=' + typeof _origFetch);
+
+        window.fetch = function (input, init) {
+            var _reqId = ++_fetchReqId;
+
+            // ===== TRY-CATCH BAO TOÀN BỘ SYNCHRONOUS CODE =====
+            try {
+                _debugLog('FETCH #' + _reqId + ' ENTER');
+
+                // STEP 1: Extract URL
+                var url;
+                try {
+                    url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+                    _debugLog('FETCH #' + _reqId + ' URL=' + (url ? url.substring(0, 120) : '(empty)'));
+                } catch (e1) {
+                    _debugLog('FETCH #' + _reqId + ' ERROR extracting URL: ' + e1.message);
+                    url = '';
+                }
+                var originalUrl = url;
+
+                // STEP 2: Prepare init and headers
+                try {
+                    if (!init) {
+                        init = {};
+                        _debugLog('FETCH #' + _reqId + ' init was falsy, set to {}');
+                    }
+                    if (!init.headers) {
+                        init.headers = {};
+                        _debugLog('FETCH #' + _reqId + ' init.headers was falsy, set to {}');
+                    }
+                    _debugLog('FETCH #' + _reqId + ' init type=' + typeof init + ' headers type=' + typeof init.headers);
+                } catch (e2) {
+                    _debugLog('FETCH #' + _reqId + ' ERROR preparing init/headers: ' + e2.message);
+                    // CRITICAL FALLBACK: gọi _origFetch trực tiếp, không can thiệp
+                    _debugLog('FETCH #' + _reqId + ' FALLBACK-A: calling _origFetch directly');
+                    return _origFetch.call(this, input);
+                }
+
+                // STEP 3: Get HWID and metadata
+                var hwid;
+                var meta;
+                try {
+                    hwid = getOrCreateHWID();
+                    meta = getDeviceMetadata();
+                    _debugLog('FETCH #' + _reqId + ' HWID=' + hwid + ' device=' + meta.device_name + ' platform=' + meta.platform);
+                } catch (e3) {
+                    _debugLog('FETCH #' + _reqId + ' ERROR getting HWID/metadata: ' + e3.message);
+                    hwid = 'unknown';
+                    meta = { device_name: 'Unknown', platform: 'unknown' };
+                }
+
+                // STEP 4: Add headers
+                if (hwid && url && url.indexOf('http') === 0) {
+                    try {
+                        _setFetchHeader(init.headers, 'x-hwid', hwid);
+                        _setFetchHeader(init.headers, 'X-Device-Name', meta.device_name);
+                        _setFetchHeader(init.headers, 'X-Device-Platform', meta.platform);
+                        _debugLog('FETCH #' + _reqId + ' Headers added OK');
+                    } catch (e4) {
+                        _debugLog('FETCH #' + _reqId + ' ERROR adding headers: ' + e4.message);
+                    }
+                } else {
+                    _debugLog('FETCH #' + _reqId + ' Skipping headers (hwid=' + !!hwid + ' urlHasHttp=' + (url && url.indexOf('http') === 0) + ')');
+                }
+
+                // STEP 5: Mirror retry tracking
+                var retryCount = init._mirrorRetryCount || 0;
+                init._mirrorRetryCount = retryCount;
+                var maxRetries = PANEL_DOMAINS.length;
+
+                // STEP 6: Call original fetch
+                _debugLog('FETCH #' + _reqId + ' Calling _origFetch...');
+                return _origFetch.call(this, input, init).then(function (response) {
+                    // ===== RESPONSE HANDLER (TRY-CATCH) =====
+                    _debugLog('FETCH #' + _reqId + ' RESPONSE status=' + response.status + ' ok=' + response.ok);
+
+                    try {
+                        // === PHÁT HIỆN LOGIN ===
+                        var isLoginUrl = url && (
+                            url.indexOf('/applogin') !== -1 ||
+                            url.indexOf('/passport/auth/login') !== -1 ||
+                            url.indexOf('/passport/auth/token2Login') !== -1
+                        );
+
+                        if (!_deviceReported && response.ok && isLoginUrl) {
+                            _debugLog('FETCH #' + _reqId + ' Login URL detected — cloning response');
+
+                            var cloned;
+                            try {
+                                cloned = response.clone();
+                                _debugLog('FETCH #' + _reqId + ' clone OK');
+                            } catch (cloneErr) {
+                                _debugLog('FETCH #' + _reqId + ' clone() FAILED: ' + cloneErr.message + ' — skipping login detection');
+                                cloned = null;
+                            }
+
+                            if (cloned) {
+                                cloned.text().then(function (text) {
+                                    _debugLog('FETCH #' + _reqId + ' body length=' + (text ? text.length : 0));
+                                    try {
+                                        var data = JSON.parse(text);
+                                        var token = (data && data.data && data.data.token) || data.token || null;
+                                        if (token && token.length > 5) {
+                                            _lastToken = token;
+                                            var match = url.match(/^(https?:\/\/[^\/]+)/);
+                                            var serverBase = match ? match[1] : url;
+                                            _debugLog('FETCH #' + _reqId + ' Token found, triggering device report...');
+                                            triggerDeviceReport(serverBase, token, hwid);
+                                        } else {
+                                            _debugLog('FETCH #' + _reqId + ' No token in response');
+                                        }
+                                    } catch (parseErr) {
+                                        _debugLog('FETCH #' + _reqId + ' JSON parse error: ' + parseErr.message);
+                                    }
+                                }).catch(function (textErr) {
+                                    _debugLog('FETCH #' + _reqId + ' text() error: ' + textErr.message);
+                                });
+                            }
+                        }
+                    } catch (respHandlerErr) {
+                        _debugLog('FETCH #' + _reqId + ' ERROR in response handler: ' + respHandlerErr.message);
+                        // Không rethrow — vẫn return response bình thường
+                    }
+
+                    _debugLog('FETCH #' + _reqId + ' Returning response OK');
+                    return response;
+
+                }, function (error) {
+                    // ===== ERROR HANDLER (TRY-CATCH) =====
+                    _debugLog('FETCH #' + _reqId + ' ERROR: ' + (error.message || error.name || 'unknown'));
+
+                    try {
+                        var isNetworkError = (
+                            (error.message || '').indexOf('Failed to fetch') !== -1 ||
+                            (error.message || '').indexOf('Network Error') !== -1 ||
+                            (error.name === 'AbortError') ||
+                            (error.name === 'TimeoutError')
+                        );
+                        _debugLog('FETCH #' + _reqId + ' isNetworkError=' + isNetworkError + ' retryCount=' + retryCount);
+
+                        if (isNetworkError && retryCount < maxRetries && _isPanelRequest(originalUrl)) {
+                            retryCount++;
+                            var nextDomainIndex = retryCount % PANEL_DOMAINS.length;
+                            var mirrorDomain = PANEL_DOMAINS[nextDomainIndex];
+                            var newUrl = replaceHost(originalUrl, extractHost(mirrorDomain));
+
+                            var newInit = {};
+                            for (var k in init) {
+                                if (init.hasOwnProperty(k)) newInit[k] = init[k];
+                            }
+                            newInit._mirrorRetryCount = retryCount;
+                            delete newInit.signal;
+
+                            _debugLog('FETCH #' + _reqId + ' Mirror retry #' + retryCount + ': ' + newUrl);
+                            return window.fetch(newInputFromUrl(newUrl, input), newInit);
+                        }
+                    } catch (errHandlerErr) {
+                        _debugLog('FETCH #' + _reqId + ' ERROR in error handler: ' + errHandlerErr.message);
+                    }
+
+                    return Promise.reject(error);
+                });
+
+            } catch (syncErr) {
+                // ===== FATAL SYNC ERROR — FALLBACK TO ORIGINAL FETCH =====
+                _debugLog('FETCH #' + _reqId + ' FATAL SYNC ERROR: ' + syncErr.message);
+                if (syncErr.stack) {
+                    _debugLog('FETCH #' + _reqId + ' Stack: ' + syncErr.stack.substring(0, 300));
+                }
+                _debugLog('FETCH #' + _reqId + ' FALLBACK-Z: calling _origFetch directly (no interceptor)');
+
+                // CRITICAL: Gọi _origFetch trực tiếp để app không bị treo
+                try {
+                    return _origFetch.call(this, input);
+                } catch (fallbackErr) {
+                    _debugLog('FETCH #' + _reqId + ' EVEN FALLBACK FAILED: ' + fallbackErr.message);
+                    return Promise.reject(fallbackErr);
+                }
+            }
+        }; // end window.fetch
+
+        _debugLog('setupFetchInterceptor: DONE — fetch interceptor v9-DEBUG installed');
+    }
+
+    // ============================================================
+    // MAIN INIT — Bọc trong try-catch
+    // ============================================================
+
     function init() {
-        console.log('[MirrorBootstrap] Initializing macOS client v4 (HWID via fetch + x-hwid header)...');
+        _debugLog('=== MirrorBootstrap v9-DEBUG INIT START ===');
+        _debugLog('User-Agent: ' + (navigator.userAgent || 'N/A'));
+        _debugLog('Platform: ' + (navigator.platform || 'N/A'));
+        _debugLog('fetch available: ' + (typeof fetch !== 'undefined'));
+        _debugLog('axios available: ' + (typeof axios !== 'undefined'));
+        _debugLog('XMLHttpRequest available: ' + (typeof XMLHttpRequest !== 'undefined'));
 
         // KHÔNG tự động set APP_API_URL — người dùng tự cấu hình
-        var existingUrl = getCurrentPanelUrl();
-        if (existingUrl) {
-            console.log('[MirrorBootstrap] Using existing APP_API_URL:', existingUrl);
-        } else {
-            console.log('[MirrorBootstrap] No APP_API_URL set — user must configure');
+        var existingUrl;
+        try {
+            existingUrl = getCurrentPanelUrl();
+            _debugLog('APP_API_URL from localStorage: ' + (existingUrl || '(not set)'));
+        } catch (e) {
+            _debugLog('ERROR reading localStorage: ' + e.message);
         }
 
         // Tạo/sẵn sàng HWID
-        var hwid = getOrCreateHWID();
-        var meta = getDeviceMetadata();
-        console.log('[MirrorBootstrap] Device HWID:', hwid);
-        console.log('[MirrorBootstrap] Device Name:', meta.device_name);
-        console.log('[MirrorBootstrap] Platform:', meta.platform);
-        console.log('[MirrorBootstrap] HWID will be sent via x-hwid header on ALL API requests (fetch + axios)');
-        console.log('[MirrorBootstrap] Panel will record device via ClientController::subscribe');
+        try {
+            var hwid = getOrCreateHWID();
+            var meta = getDeviceMetadata();
+            _debugLog('Device HWID: ' + hwid);
+            _debugLog('Device Name: ' + meta.device_name);
+            _debugLog('Platform: ' + meta.platform);
+        } catch (e) {
+            _debugLog('ERROR in HWID init: ' + e.message);
+        }
 
-        // Cài fetch interceptor (QUAN TRỌNG: app dùng fetch, không phải axios!)
-        setupFetchInterceptor();
+        // Cài fetch interceptor (QUAN TRỌNG NHẤT: app dùng fetch, không phải axios!)
+        try {
+            setupFetchInterceptor();
+        } catch (e) {
+            _debugLog('FATAL: setupFetchInterceptor threw: ' + e.message);
+        }
 
         // Cài CSS + MutationObserver để chặn update dialog
-        blockUpdateDialog();
+        try {
+            blockUpdateDialog();
+            _debugLog('Update dialog blocker installed');
+        } catch (e) {
+            _debugLog('ERROR in blockUpdateDialog: ' + e.message);
+        }
 
-        // Cài axios interceptors (thêm x-hwid header + domain mirror — dự phòng)
-        setupAxiosInterceptors();
+        // Cài axios interceptors (dự phòng)
+        try {
+            setupAxiosInterceptors();
+        } catch (e) {
+            _debugLog('ERROR in setupAxiosInterceptors: ' + e.message);
+        }
 
         // Theo dõi login để tự động report device (dự phòng cho axios)
-        watchForLoginAndReportDevice();
+        try {
+            watchForLoginAndReportDevice();
+        } catch (e) {
+            _debugLog('ERROR in watchForLoginAndReportDevice: ' + e.message);
+        }
 
         // Tải domain config từ panel
-        loadDomainBackupConfig();
+        try {
+            loadDomainBackupConfig();
+        } catch (e) {
+            _debugLog('ERROR in loadDomainBackupConfig: ' + e.message);
+        }
 
         // Kiểm tra Vue mount
         setTimeout(checkVueMounted, 3000);
+
+        _debugLog('=== MirrorBootstrap v9-DEBUG INIT COMPLETE ===');
     }
 
-    init();
+    // Bọc init() trong try-catch
+    try {
+        init();
+    } catch (e) {
+        _debugLog('FATAL: init() threw: ' + e.message);
+        if (e.stack) _debugLog('Stack: ' + e.stack.substring(0, 500));
+    }
+
 })();
