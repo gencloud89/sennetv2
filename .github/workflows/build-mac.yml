@@ -189,23 +189,24 @@ jobs:
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # 1. Tạo DMG với /Applications symlink để kéo thả
-          echo "--- Creating DMG with /Applications symlink ---"
-          TMP_DMG="/tmp/sennet_tmp.dmg"
-          APP_SIZE=$(du -sk "${APP_BUNDLE}" | cut -f1)
-          DMG_SIZE=$((APP_SIZE + 100000))
-          hdiutil create -size ${DMG_SIZE}k -fs HFS+ -volname "SENNET" -attach "${TMP_DMG}"
-          MOUNT_POINT=$(hdiutil info | grep "/Volumes/SENNET" | awk '{print $NF}')
-          [ -z "$MOUNT_POINT" ] && MOUNT_POINT="/Volumes/SENNET"
-          cp -R "${APP_BUNDLE}" "${MOUNT_POINT}/"
-          ln -s /Applications "${MOUNT_POINT}/Applications"
-          hdiutil detach "${MOUNT_POINT}" -force
-          hdiutil convert "${TMP_DMG}" -format UDBZ -o "output/${ARM64_DMG}"
-          rm -f "${TMP_DMG}"
+          # 1. Tạo thư mục tạm với .app + /Applications symlink
+          TMPDIR="/tmp/sennet_dmg"
+          rm -rf "${TMPDIR}"
+          mkdir -p "${TMPDIR}"
+          cp -R "${APP_BUNDLE}" "${TMPDIR}/"
+          ln -s /Applications "${TMPDIR}/Applications"
+
+          # 2. Tạo DMG từ thư mục tạm (NHANH - dùng srcfolder trực tiếp)
+          echo "--- Creating DMG ---"
+          hdiutil create -volname "SENNET" \
+            -srcfolder "${TMPDIR}" \
+            -ov -format UDBZ \
+            "output/${ARM64_DMG}"
+          rm -rf "${TMPDIR}"
           ls -la "output/${ARM64_DMG}"
 
-          # 2. Tạo 7z (LZMA2 ultra)
-          echo "--- Creating 7z (LZMA2 ultra) ---"
+          # 3. Tạo 7z (LZMA2 ultra)
+          echo "--- Creating 7z ---"
           brew install p7zip 2>/dev/null || true
           if command -v 7z &>/dev/null; then
             7z a -mx9 -md=256m -mfb=273 -ms=on "output/${ARM64_7Z}" "${APP_BUNDLE}"
