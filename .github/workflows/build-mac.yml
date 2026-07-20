@@ -140,52 +140,55 @@ jobs:
             echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
           fi
 
-      - name: Strip unnecessary Electron files (giảm dung lượng, AN TOÀN)
+      - name: Strip unnecessary Electron files (giảm dung lượng MẠNH + AN TOÀN)
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
 
+          echo "=== STRIP START ==="
           echo "Before strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
-          # Xóa SwiftShader — software GPU render, không cần trên Apple Silicon
-          # SwiftShader là thư viện render GPU bằng phần mềm, tiết kiệm ~30MB
-          rm -rf "${APP_BUNDLE}/Contents/Frameworks/"*SwiftShader* 2>/dev/null || true
+          # 1. Xóa SwiftShader (software GPU render, ~20-30MB) — Apple Silicon có GPU hardware
+          echo "--- Removing SwiftShader ---"
+          find "${APP_BUNDLE}/Contents" -name "SwiftShader" -type d -exec rm -rf {} + 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "*SwiftShader*" -exec rm -rf {} + 2>/dev/null || true
+          rm -f "${APP_BUNDLE}/Contents/Resources/vk_swiftshader"* 2>/dev/null || true
+          rm -f "${APP_BUNDLE}/Contents/Frameworks/libvk_swiftshader"* 2>/dev/null || true
+          echo "After SwiftShader: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
-          # Xóa Vulkan ICD config (không cần)
-          rm -f "${APP_BUNDLE}/Contents/Resources/"vk_swiftshader* 2>/dev/null || true
+          # 2. Xóa locale .lproj không cần — CHỈ giữ English (~20-25MB)
+          echo "--- Removing unused locales ---"
+          LPROJ_COUNT=0
+          find "${APP_BUNDLE}/Contents" -name "*.lproj" -type d | while read lproj; do
+            lang=$(basename "$lproj" .lproj)
+            # Giữ English + Chinese
+            if [ "$lang" != "en" ] && [ "$lang" != "English" ] && [ "$lang" != "zh_CN" ] && [ "$lang" != "zh_TW" ]; then
+              rm -rf "$lproj" 2>/dev/null || true
+              echo "  Removed locale: $lang"
+            else
+              echo "  Kept locale: $lang"
+            fi
+          done
+          echo "After locales: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
-          # XÓA CÓ CHỌN LỌC: chỉ xóa locale .lproj không cần thiết
-          # Giữ lại en (English), zh_CN (Chinese Simplified), zh_TW (Chinese Traditional)
-          # KHÔNG xóa các file resource khác — framework cần chúng để hoạt động
-          EF="${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework"
-          if [ -d "$EF/Resources" ]; then
-            for lproj in "$EF/Resources/"*.lproj; do
-              if [ -d "$lproj" ]; then
-                lang=$(basename "$lproj" .lproj)
-                case "$lang" in
-                  en|zh_CN|zh_TW) ;; # Giữ lại các locale cần thiết
-                  *)
-                    rm -rf "$lproj" 2>/dev/null || true
-                    echo "  Removed locale: $lang"
-                    ;;
-                esac
-              fi
-            done
-          fi
+          # 3. Xóa debug symbols, dSYM (~5-10MB)
+          echo "--- Removing debug symbols ---"
+          find "${APP_BUNDLE}" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
+          find "${APP_BUNDLE}" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
+          echo "After debug: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
-          # Xóa Debug symbols, dSYM
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
+          # 4. Xóa LICENSES, version files (~2-5MB)
+          echo "--- Removing license/version files ---"
+          find "${APP_BUNDLE}" -not -path "*\.framework/Versions/*/Resources/*" \( -name "LICENSE*" -o -name "*.version" \) -delete 2>/dev/null || true
+          echo "After licenses: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
-          # Xóa LICENSES, version files (không xóa Info.plist trong .framework!)
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "LICENSE*" -delete 2>/dev/null || true
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.version" -delete 2>/dev/null || true
-          # Xóa Info.plist chỉ ở thư mục không phải .framework bundle
+          # 5. Xóa Info.plist ngoài .framework bundles (giữ Info.plist trong framework)
           find "${APP_BUNDLE}/Contents/Frameworks" -name "Info.plist" -not -path "*\.framework/*" -delete 2>/dev/null || true
 
-          # Xóa các thư mục trống sau khi dọn
-          find "${APP_BUNDLE}/Contents/Frameworks" -type d -empty -delete 2>/dev/null || true
+          # 6. Dọn thư mục trống
+          find "${APP_BUNDLE}/Contents" -type d -empty -delete 2>/dev/null || true
 
+          echo "=== STRIP DONE ==="
           echo "After strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
 
       - name: Create DMG
