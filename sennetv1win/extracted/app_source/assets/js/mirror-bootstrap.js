@@ -1,5 +1,5 @@
 /**
- * mirror-bootstrap.js — Domain Mirror + HWID Fix cho SENNET VPN Windows
+ * mirror-bootstrap.js — Domain Mirror + HWID Fix cho SENNET VPN macOS
  * ==================================================================
  * Chức năng:
  *   1. Domain panel & subscribe mirror (china-mirror-guide.md)
@@ -26,6 +26,8 @@
 
     var PANEL_DOMAINS = [
         'https://kio.senviet.us',
+        'https://appsenviet.htb991.space',
+        'https://htb991.space',
         'https://mirrorhk1.scdh2268.com',
         'https://mirrorhk2.scdh2268.com',
         'https://mirrorhk3.scdh2268.com',
@@ -36,6 +38,8 @@
 
     var SUBSCRIBE_HOSTS = [
         'venom.cdy.892.htd892.com',
+        'appsenviet.htb991.space',
+        'htb991.space',
         'submirror1.scdh2268.com',
         'submirror2.scdh2268.com',
         'submirror3.scdh2268.com',
@@ -139,12 +143,12 @@
             hash |= 0;
         }
 
-        // Format: WIN-XXXXXXXX (ngắn gọn, dễ đọc trong panel)
+        // Format: MAC-XXXXXXXX (ngắn gọn, dễ đọc trong panel)
         // Panel normalizeHwid cắt 128 chars nên ta giữ format ngắn
         var h = Math.abs(hash).toString(16).toUpperCase();
         while (h.length < 8) h = '0' + h;
         var shortHost = (parts[0] || 'UNKNOWN').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8).toUpperCase();
-        return 'WIN-' + shortHost + '-' + h.substring(0, 8);
+        return 'MAC-' + shortHost + '-' + h.substring(0, 8);
     }
 
     function getOrCreateHWID() {
@@ -175,16 +179,16 @@
         try {
             var os = require('os');
             return {
-                device_name: os.hostname() || 'Windows PC',
-                platform: os.platform() + ' ' + os.arch(),  // win32 x64
-                user_agent: navigator.userAgent || 'windows.v2board.app 2.0',
+                device_name: os.hostname() || 'Mac',
+                platform: os.platform() + ' ' + os.arch(),  // darwin arm64
+                user_agent: navigator.userAgent || 'macos.v2board.app 2.0',
                 os_release: os.release()
             };
         } catch (e) {
             return {
-                device_name: 'Windows PC',
-                platform: 'win32',
-                user_agent: navigator.userAgent || 'windows.v2board.app 2.0'
+                device_name: 'Mac',
+                platform: 'darwin',
+                user_agent: navigator.userAgent || 'macos.v2board.app 2.0'
             };
         }
     }
@@ -402,27 +406,25 @@
 
     function blockUpdateDialog() {
         // CSS để ẩn update dialog — dùng !important để ghi đè mọi style
+        // FIX: KHÔNG dùng [class*="update"] vì sẽ ẩn nhầm các UI element hợp lệ
+        //      (vd: status update, form update button, v.v.)
+        //      Chỉ ẩn các class dialog/modal cụ thể liên quan đến update
         var css = '\
-            /* Ẩn dialog/modal chứa text "new version" hoặc "update" */ \
-            .el-message-box__wrapper, \
-            .el-dialog__wrapper, \
+            /* Ẩn dialog chứa class update-dialog hoặc version-dialog */ \
             .update-dialog, \
             .version-dialog, \
-            [class*="update"], \
-            [class*="newVersion"], \
             .modal-update, \
-            .dialog-update { \
+            .dialog-update, \
+            .el-message-box__wrapper.update-available { \
                 display: none !important; \
                 visibility: hidden !important; \
                 pointer-events: none !important; \
                 z-index: -9999 !important; \
                 opacity: 0 !important; \
             } \
-            /* Ẩn overlay/mask của dialog */ \
-            .v-modal, \
-            .el-overlay, \
-            .modal-mask, \
-            .dialog-mask { \
+            /* Ẩn overlay/mask của dialog (chỉ ẩn khi dialog update bị ẩn) */ \
+            .v-modal:has(+ .update-dialog), \
+            .el-overlay:has(+ .el-message-box__wrapper.update-available) { \
                 display: none !important; \
             } \
         ';
@@ -432,41 +434,56 @@
         document.head.appendChild(style);
 
         // MutationObserver — quét và ẩn dialog update xuất hiện sau này
+        // FIX: KHÔNG dùng characterData:true (gây quét toàn bộ DOM khi Vue render text)
+        // FIX: KHÔNG dùng querySelectorAll('*') (quá chậm khi DOM lớn)
+        // FIX: Debounce 500ms để tránh quét liên tục trong lúc Vue render
+        // FIX: KHÔNG gọi el.remove() để tránh observer tự kích hoạt lại (infinite loop)
+        var _observerDebounceTimer = null;
+        var _observerDebounceMs = 500;
+
         var observer = new MutationObserver(function (mutations) {
-            // Tìm element chứa text "new version" hoặc "update"
-            var allElements = document.querySelectorAll('*');
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var text = (el.textContent || '').toLowerCase();
-                var className = (el.className || '').toString().toLowerCase();
-
-                // Phát hiện dialog update qua text hoặc class
-                if ((text.indexOf('new version') !== -1 ||
-                     text.indexOf('new version found') !== -1 ||
-                     text.indexOf('cập nhật') !== -1 ||
-                     text.indexOf('phiên bản mới') !== -1 ||
-                     text.indexOf('đã có bản cập nhật') !== -1) &&
-                    (className.indexOf('dialog') !== -1 ||
-                     className.indexOf('modal') !== -1 ||
-                     className.indexOf('message') !== -1 ||
-                     className.indexOf('popup') !== -1 ||
-                     className.indexOf('notification') !== -1 ||
-                     el.tagName === 'DIALOG')) {
-
-                    console.log('[MirrorBootstrap] Hiding update dialog:', el.className || el.tagName);
-                    el.style.display = 'none';
-                    el.style.visibility = 'hidden';
-                    el.remove();
-                }
+            // Debounce: chỉ quét sau khi DOM ngừng thay đổi 500ms
+            if (_observerDebounceTimer) {
+                clearTimeout(_observerDebounceTimer);
             }
+            _observerDebounceTimer = setTimeout(function () {
+                _observerDebounceTimer = null;
+                // Chỉ tìm các element dialog/modal cụ thể (không quét toàn bộ DOM)
+                var dialogElements = document.querySelectorAll(
+                    '.el-message-box, .el-dialog, .el-message, .el-notification, ' +
+                    '[class*="dialog"], [class*="modal"], [class*="popup"], ' +
+                    'dialog, [role="dialog"], [role="alertdialog"]'
+                );
+                for (var i = 0; i < dialogElements.length; i++) {
+                    var el = dialogElements[i];
+                    // Bỏ qua nếu element đã bị ẩn hoặc xóa
+                    if (!el.isConnected || el.style.display === 'none') continue;
+
+                    var text = (el.textContent || '').toLowerCase();
+
+                    // Phát hiện dialog update qua text
+                    if (text.indexOf('new version') !== -1 ||
+                        text.indexOf('new version found') !== -1 ||
+                        text.indexOf('cập nhật') !== -1 ||
+                        text.indexOf('phiên bản mới') !== -1 ||
+                        text.indexOf('đã có bản cập nhật') !== -1) {
+
+                        console.log('[MirrorBootstrap] Hiding update dialog:', el.className || el.tagName);
+                        // Ẩn thay vì xóa để tránh infinite loop
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.setAttribute('data-mirror-hidden', 'true');
+                    }
+                }
+            }, _observerDebounceMs);
         });
 
-        // Bắt đầu observe khi DOM sẵn sàng
+        // Bắt đầu observe khi DOM sẵn sàng — CHỈ observe childList (KHÔNG characterData)
         if (document.body) {
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+            observer.observe(document.body, { childList: true, subtree: true });
         } else {
             document.addEventListener('DOMContentLoaded', function () {
-                observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                observer.observe(document.body, { childList: true, subtree: true });
             });
         }
 
@@ -487,19 +504,37 @@
         }
 
         // Intercept login response để phát hiện login thành công
+        // Hỗ trợ cả 2 pattern: /passport/auth/login (Android) và /api/v1/app/applogin (Windows/Mac)
+        // Windows/Mac app trả token ở top-level: {token: "..."}
+        // Android app trả token trong data: {data: {auth_data: "...", token: "..."}}
         axios.interceptors.response.use(
             function (response) {
-                // Phát hiện login thành công (cả auth/login và token2Login)
-                if (response.config && response.config.url &&
-                    (response.config.url.indexOf('/passport/auth/login') !== -1 ||
-                     response.config.url.indexOf('/passport/auth/token2Login') !== -1) &&
-                    response.data && response.data.data && response.data.data.auth_data) {
+                // Phát hiện login thành công — hỗ trợ cả Android và Windows/Mac path
+                var isLoginUrl = response.config && response.config.url && (
+                    response.config.url.indexOf('/passport/auth/login') !== -1 ||
+                    response.config.url.indexOf('/passport/auth/token2Login') !== -1 ||
+                    response.config.url.indexOf('/api/v1/app/applogin') !== -1
+                );
 
-                    console.log('[MirrorBootstrap] Login detected — will report device to panel');
+                // Lấy auth_data hoặc token từ response (hỗ trợ cả 2 cấu trúc)
+                var authData = null;
+                var token = null;
+                if (response.data) {
+                    // Windows/Mac: token ở top-level
+                    authData = response.data.auth_data || null;
+                    token = response.data.token || null;
+                    // Android: token và auth_data trong data.data
+                    if (response.data.data) {
+                        authData = authData || response.data.data.auth_data;
+                        token = token || response.data.data.token;
+                    }
+                }
+
+                if (isLoginUrl && (authData || token)) {
+                    console.log('[MirrorBootstrap] Login detected (axios) — will report device to panel');
 
                     // Đợi 2 giây cho app khởi tạo xong, sau đó gọi subscribe
                     setTimeout(function () {
-                        var authData = response.data.data.auth_data;
                         var panelUrl = getCurrentPanelUrl();
                         if (!panelUrl) {
                             // Thử lấy từ URL của request login
@@ -520,21 +555,25 @@
                         console.log('[MirrorBootstrap]   URL:', subscribeUrl);
 
                         // Gọi subscribe với x-hwid header để ghi device
-                        // Thêm token từ auth_data response nếu có
                         var params = '';
-                        if (response.data.data.token) {
-                            params = '?token=' + encodeURIComponent(response.data.data.token);
+                        if (token) {
+                            params = '?token=' + encodeURIComponent(token);
                         }
 
                         axios.get(subscribeUrl + params, {
                             headers: {
                                 'x-hwid': hwid,
-                                'User-Agent': navigator.userAgent || 'windows.v2board.app 2.0'
+                                'User-Agent': navigator.userAgent || 'macos.v2board.app 2.0'
                             },
                             timeout: 15000
                         }).then(function (res) {
                             console.log('[MirrorBootstrap] Device reported successfully to panel!');
                             console.log('[MirrorBootstrap] Check v2_user_device table for new device');
+                            // Clear periodic retry timer sau khi thành công
+                            if (_reportRetryTimer) {
+                                clearInterval(_reportRetryTimer);
+                                _reportRetryTimer = null;
+                            }
                         }).catch(function (err) {
                             console.error('[MirrorBootstrap] Device report failed:', err.message);
                             // Retry sau 5 giây
@@ -619,39 +658,43 @@
 
         window.fetch = function (input, init) {
             var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-            var originalUrl = url; // Lưu URL gốc để retry với mirror
+            var originalUrl = url;
 
             // Đảm bảo init và headers tồn tại
             if (!init) init = {};
             if (!init.headers) init.headers = {};
 
-            // Thêm x-hwid header vào MỌI request đến panel API
+            // Thêm x-hwid header vào MỌI request HTTP
             var hwid = getOrCreateHWID();
             var meta = getDeviceMetadata();
 
-            // Luôn thêm HWID headers nếu có URL và HWID
             if (hwid && url && url.indexOf('http') === 0) {
                 _setFetchHeader(init.headers, 'x-hwid', hwid);
                 _setFetchHeader(init.headers, 'X-Device-Name', meta.device_name);
                 _setFetchHeader(init.headers, 'X-Device-Platform', meta.platform);
             }
 
-            // Lưu retry count vào init (dùng thuộc tính tạm)
+            // Mirror retry tracking
             var retryCount = init._mirrorRetryCount || 0;
             init._mirrorRetryCount = retryCount;
             var maxRetries = PANEL_DOMAINS.length;
 
             // Gọi fetch gốc
-            return _origFetch.apply(this, arguments).then(function (response) {
-                // Phát hiện authentication thành công — tìm token trong response
-                if (!_deviceReported && response.ok && url && url.indexOf('http') === 0) {
-                    var cloned = response.clone();
-                    cloned.text().then(function (text) {
+            return _origFetch.call(this, input, init).then(function (response) {
+                // === PHÁT HIỆN LOGIN ===
+                // Chỉ kiểm tra URL pattern — KHÔNG clone/scan response body
+                var isLoginUrl = url && (
+                    url.indexOf('/applogin') !== -1 ||
+                    url.indexOf('/passport/auth/login') !== -1 ||
+                    url.indexOf('/passport/auth/token2Login') !== -1
+                );
+                if (!_deviceReported && response.ok && isLoginUrl) {
+                    console.log('[MirrorBootstrap] Login URL detected — will report device');
+                    response.clone().text().then(function (text) {
                         try {
                             var data = JSON.parse(text);
                             var token = (data && data.data && data.data.token) || data.token || null;
                             if (token && token.length > 5) {
-                                console.log('[MirrorBootstrap] Auth token detected in response — will report device');
                                 _lastToken = token;
                                 var match = url.match(/^(https?:\/\/[^\/]+)/);
                                 var serverBase = match ? match[1] : url;
@@ -663,17 +706,13 @@
 
                 return response;
             }, function (error) {
-                // === MIRROR DOMAIN RETRY ===
-                // Nếu request thất bại (network error, timeout) và chưa hết retry
-                // → thử lại với mirror domain tiếp theo
-                var isNetworkError = !error.response &&
-                    (error.code === 'ECONNABORTED' ||
-                     error.code === 'ERR_NETWORK' ||
-                     error.code === 'ERR_CONNECTION_REFUSED' ||
-                     error.code === 'ERR_TIMED_OUT' ||
-                     (error.message || '').indexOf('Network Error') !== -1 ||
-                     (error.message || '').indexOf('timeout') !== -1 ||
-                     (error.message || '').indexOf('Failed to fetch') !== -1);
+                // === MIRROR DOMAIN RETRY (đơn giản) ===
+                var isNetworkError = (
+                    (error.message || '').indexOf('Failed to fetch') !== -1 ||
+                    (error.message || '').indexOf('Network Error') !== -1 ||
+                    (error.name === 'AbortError') ||
+                    (error.name === 'TimeoutError')
+                );
 
                 if (isNetworkError && retryCount < maxRetries && _isPanelRequest(originalUrl)) {
                     retryCount++;
@@ -681,18 +720,14 @@
                     var mirrorDomain = PANEL_DOMAINS[nextDomainIndex];
                     var newUrl = replaceHost(originalUrl, extractHost(mirrorDomain));
 
-                    // Tăng timeout cho lần retry
                     var newInit = {};
                     for (var k in init) {
                         if (init.hasOwnProperty(k)) newInit[k] = init[k];
                     }
                     newInit._mirrorRetryCount = retryCount;
-                    if (!newInit.timeout && !newInit.signal) {
-                        newInit.timeout = (init.timeout || 10000) + 5000;
-                    }
+                    delete newInit.signal;
 
-                    console.log('[MirrorBootstrap] Fetch FAILED — retry #' + retryCount +
-                        ' with mirror:', newUrl);
+                    console.log('[MirrorBootstrap] Retry #' + retryCount + ' with mirror:', newUrl);
                     return window.fetch(newInputFromUrl(newUrl, input), newInit);
                 }
 
@@ -700,7 +735,7 @@
             });
         };
 
-        console.log('[MirrorBootstrap] Fetch interceptor installed — HWID + Mirror retry + Auto-detect auth');
+        console.log('[MirrorBootstrap] Fetch interceptor: x-hwid headers + login detect + mirror retry');
     }
 
     // Helper: tạo input mới từ URL đã thay đổi (giữ nguyên cấu trúc input gốc)
@@ -737,7 +772,7 @@
             'x-hwid': hwid,
             'X-Device-Name': meta.device_name,
             'X-Device-Platform': meta.platform,
-            'User-Agent': navigator.userAgent || 'windows.v2board.app 2.0'
+            'User-Agent': navigator.userAgent || 'macos.v2board.app 2.0'
         };
 
         var doReport = function () {
@@ -748,13 +783,18 @@
             xhr.setRequestHeader('x-hwid', hwid);
             xhr.setRequestHeader('X-Device-Name', meta.device_name);
             xhr.setRequestHeader('X-Device-Platform', meta.platform);
-            xhr.setRequestHeader('User-Agent', navigator.userAgent || 'windows.v2board.app 2.0');
+            xhr.setRequestHeader('User-Agent', navigator.userAgent || 'macos.v2board.app 2.0');
             xhr.timeout = 15000;
 
             xhr.onload = function () {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     console.log('[MirrorBootstrap] ✅ Device reported SUCCESSFULLY!');
                     console.log('[MirrorBootstrap] Check v2_user_device table for new device with HWID:', hwid);
+                    // Clear periodic retry timer sau khi thành công (không cần retry nữa)
+                    if (_reportRetryTimer) {
+                        clearInterval(_reportRetryTimer);
+                        _reportRetryTimer = null;
+                    }
                 } else {
                     console.error('[MirrorBootstrap] ❌ Device report FAILED — HTTP ' + xhr.status);
                     // Retry sau 10 giây
@@ -801,7 +841,7 @@
     }
 
     function init() {
-        console.log('[MirrorBootstrap] Initializing Windows client v4 (HWID via fetch + x-hwid header)...');
+        console.log('[MirrorBootstrap] Initializing macOS client v4 (HWID via fetch + x-hwid header)...');
 
         // KHÔNG tự động set APP_API_URL — người dùng tự cấu hình
         var existingUrl = getCurrentPanelUrl();

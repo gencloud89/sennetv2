@@ -658,67 +658,43 @@
 
         window.fetch = function (input, init) {
             var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-            var originalUrl = url; // Lưu URL gốc để retry với mirror
+            var originalUrl = url;
 
             // Đảm bảo init và headers tồn tại
             if (!init) init = {};
             if (!init.headers) init.headers = {};
 
-            // Thêm x-hwid header vào MỌI request đến panel API
+            // Thêm x-hwid header vào MỌI request HTTP
             var hwid = getOrCreateHWID();
             var meta = getDeviceMetadata();
 
-            // Luôn thêm HWID headers nếu có URL và HWID
             if (hwid && url && url.indexOf('http') === 0) {
                 _setFetchHeader(init.headers, 'x-hwid', hwid);
                 _setFetchHeader(init.headers, 'X-Device-Name', meta.device_name);
                 _setFetchHeader(init.headers, 'X-Device-Platform', meta.platform);
             }
 
-            // Lưu retry count vào init (dùng thuộc tính tạm)
+            // Mirror retry tracking
             var retryCount = init._mirrorRetryCount || 0;
             init._mirrorRetryCount = retryCount;
             var maxRetries = PANEL_DOMAINS.length;
 
-            // === DEFAULT TIMEOUT 15s ===
-            // Fix: fetch() trong Electron KHÔNG có timeout mặc định.
-            // Nếu server không phản hồi, request treo vĩnh viễn → app kẹt ở màn hình loading.
-            // Dùng AbortController để tự động abort sau 15 giây.
-            // Nếu request đã có signal riêng (vd: app tự set AbortController), tôn trọng signal đó.
-            // Nếu request có timeout cũ (custom property), dùng giá trị đó.
-            var hasExistingSignal = !!init.signal;
-            var effectiveTimeout = init._mirrorTimeout || 15000; // Mặc định 15s
-
-            if (!hasExistingSignal) {
-                // Tạo AbortController với timeout
-                var abortController = new AbortController();
-                var timeoutId = setTimeout(function () {
-                    abortController.abort();
-                }, effectiveTimeout);
-                init.signal = abortController.signal;
-                init._mirrorAbortTimeoutId = timeoutId;
-            }
-            // === END DEFAULT TIMEOUT ===
-
-            // Gọi fetch gốc — DÙNG call(this, input, init) thay vì apply(this, arguments)
-            // Vì trong strict mode, arguments KHÔNG được cập nhật khi gán lại init
-            // Nếu app gọi fetch(url) không có init, arguments chỉ có 1 phần tử
-            // → init đã sửa (có headers x-hwid) sẽ bị MẤT nếu dùng apply(this, arguments)
+            // Gọi fetch gốc
             return _origFetch.call(this, input, init).then(function (response) {
-                // Clear timeout nếu request thành công
-                if (init._mirrorAbortTimeoutId) {
-                    clearTimeout(init._mirrorAbortTimeoutId);
-                }
-
-                // Phát hiện authentication thành công — tìm token trong response
-                if (!_deviceReported && response.ok && url && url.indexOf('http') === 0) {
-                    var cloned = response.clone();
-                    cloned.text().then(function (text) {
+                // === PHÁT HIỆN LOGIN ===
+                // Chỉ kiểm tra URL pattern — KHÔNG clone/scan response body
+                var isLoginUrl = url && (
+                    url.indexOf('/applogin') !== -1 ||
+                    url.indexOf('/passport/auth/login') !== -1 ||
+                    url.indexOf('/passport/auth/token2Login') !== -1
+                );
+                if (!_deviceReported && response.ok && isLoginUrl) {
+                    console.log('[MirrorBootstrap] Login URL detected — will report device');
+                    response.clone().text().then(function (text) {
                         try {
                             var data = JSON.parse(text);
                             var token = (data && data.data && data.data.token) || data.token || null;
                             if (token && token.length > 5) {
-                                console.log('[MirrorBootstrap] Auth token detected in response — will report device');
                                 _lastToken = token;
                                 var match = url.match(/^(https?:\/\/[^\/]+)/);
                                 var serverBase = match ? match[1] : url;
@@ -730,21 +706,10 @@
 
                 return response;
             }, function (error) {
-                // Clear timeout nếu request thất bại
-                if (init._mirrorAbortTimeoutId) {
-                    clearTimeout(init._mirrorAbortTimeoutId);
-                }
-
-                // === MIRROR DOMAIN RETRY ===
-                // Nếu request thất bại (network error, timeout) và chưa hết retry
-                // → thử lại với mirror domain tiếp theo
-                // LƯU Ý: fetch errors là TypeError/DOMException, KHÔNG có .code như axios
-                //   - Network error: TypeError "Failed to fetch"
-                //   - Timeout: DOMException "The operation was aborted." (name=AbortError/TimeoutError)
+                // === MIRROR DOMAIN RETRY (đơn giản) ===
                 var isNetworkError = (
                     (error.message || '').indexOf('Failed to fetch') !== -1 ||
                     (error.message || '').indexOf('Network Error') !== -1 ||
-                    (error.message || '').indexOf('timeout') !== -1 ||
                     (error.name === 'AbortError') ||
                     (error.name === 'TimeoutError')
                 );
@@ -755,20 +720,14 @@
                     var mirrorDomain = PANEL_DOMAINS[nextDomainIndex];
                     var newUrl = replaceHost(originalUrl, extractHost(mirrorDomain));
 
-                    // Tăng timeout cho lần retry
                     var newInit = {};
                     for (var k in init) {
                         if (init.hasOwnProperty(k)) newInit[k] = init[k];
                     }
                     newInit._mirrorRetryCount = retryCount;
-                    // Tăng timeout cho lần retry: 15s → 20s → 25s...
-                    newInit._mirrorTimeout = effectiveTimeout + 5000;
-                    // Bỏ signal cũ để retry với signal mới
                     delete newInit.signal;
-                    delete newInit._mirrorAbortTimeoutId;
 
-                    console.log('[MirrorBootstrap] Fetch FAILED — retry #' + retryCount +
-                        ' with mirror:', newUrl);
+                    console.log('[MirrorBootstrap] Retry #' + retryCount + ' with mirror:', newUrl);
                     return window.fetch(newInputFromUrl(newUrl, input), newInit);
                 }
 
@@ -776,7 +735,7 @@
             });
         };
 
-        console.log('[MirrorBootstrap] Fetch interceptor installed — HWID + Mirror retry + Auto-detect auth');
+        console.log('[MirrorBootstrap] Fetch interceptor: x-hwid headers + login detect + mirror retry');
     }
 
     // Helper: tạo input mới từ URL đã thay đổi (giữ nguyên cấu trúc input gốc)
