@@ -140,95 +140,77 @@ jobs:
             echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
           fi
 
-      - name: Strip unnecessary Electron files (giảm dung lượng MẠNH + AN TOÀN)
+      - name: Strip MAX — giảm tối đa dung lượng Mac DMG
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
+          FW="${APP_BUNDLE}/Contents/Frameworks"
+          RES="${APP_BUNDLE}/Contents/Resources"
 
-          echo "=== STRIP START ==="
-          echo "Before strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+          S0=$(du -sk "${APP_BUNDLE}" | cut -f1)
+          echo ">>> START: $((S0/1024))MB"
 
-          # 1. Xóa SwiftShader (software GPU render, ~20-30MB) — Apple Silicon có GPU hardware
-          echo "--- Removing SwiftShader ---"
-          find "${APP_BUNDLE}/Contents" -name "SwiftShader" -type d -exec rm -rf {} + 2>/dev/null || true
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "*SwiftShader*" -exec rm -rf {} + 2>/dev/null || true
-          rm -f "${APP_BUNDLE}/Contents/Resources/vk_swiftshader"* 2>/dev/null || true
-          rm -f "${APP_BUNDLE}/Contents/Frameworks/libvk_swiftshader"* 2>/dev/null || true
-          echo "After SwiftShader: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+          # === 1. SwiftShader (GPU phần mềm) — Apple Silicon không cần ===
+          find "${FW}" \( -name "SwiftShader" -o -name "*swiftshader*" -o -name "libvk_swiftshader*" \) -exec rm -rf {} + 2>/dev/null || true
+          S1=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -SwiftShader: $((S0/1024))MB -> $((S1/1024))MB (saved $(((S0-S1)/1024))MB)"
 
-          # 2. Xóa locale .lproj không cần — CHỈ giữ English (~20-25MB)
-          echo "--- Removing unused locales ---"
-          LPROJ_COUNT=0
+          # === 2. XÓA TẤT CẢ locale — CHỈ giữ English ===
           find "${APP_BUNDLE}/Contents" -name "*.lproj" -type d | while read lproj; do
             lang=$(basename "$lproj" .lproj)
-            # Giữ English + Chinese
-            if [ "$lang" != "en" ] && [ "$lang" != "English" ] && [ "$lang" != "zh_CN" ] && [ "$lang" != "zh_TW" ]; then
-              rm -rf "$lproj" 2>/dev/null || true
-              echo "  Removed locale: $lang"
-            else
-              echo "  Kept locale: $lang"
-            fi
+            case "$lang" in en|English) ;; *) rm -rf "$lproj" 2>/dev/null ;; esac
           done
-          echo "After locales: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+          S2=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Locales: $((S1/1024))MB -> $((S2/1024))MB (saved $(((S1-S2)/1024))MB)"
 
-          # 3. Xóa debug symbols, dSYM (~5-10MB)
-          echo "--- Removing debug symbols ---"
-          find "${APP_BUNDLE}" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
-          find "${APP_BUNDLE}" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
-          echo "After debug: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+          # === 3. ffmpeg.dll + icudtl.dat — VPN app không cần media, giảm ~40MB ===
+          rm -f "${FW}/"*ffmpeg* "${FW}/"*icudtl* 2>/dev/null || true
+          S3=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -ffmpeg/icudtl: $((S2/1024))MB -> $((S3/1024))MB (saved $(((S2-S3)/1024))MB)"
 
-          # 4. Xóa LICENSES, version files (~2-5MB)
-          echo "--- Removing license/version files ---"
-          find "${APP_BUNDLE}" -not -path "*\.framework/Versions/*/Resources/*" \( -name "LICENSE*" -o -name "*.version" \) -delete 2>/dev/null || true
-          echo "After licenses: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+          # === 4. Chromium resources: PDF viewer, speech, printing (~15MB) ===
+          find "${RES}" \( -name "*pdf*" -o -name "*speech*" -o -name "*print*" -o -name "*crashpad*" \) -exec rm -rf {} + 2>/dev/null || true
+          S4=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -ChromiumRes: $((S3/1024))MB -> $((S4/1024))MB (saved $(((S3-S4)/1024))MB)"
 
-          # 5. Xóa Info.plist ngoài .framework bundles (giữ Info.plist trong framework)
-          find "${APP_BUNDLE}/Contents/Frameworks" -name "Info.plist" -not -path "*\.framework/*" -delete 2>/dev/null || true
+          # === 5. Xóa Squirrel.framework (auto-update — đã disable) ===
+          rm -rf "${FW}/Squirrel.framework" 2>/dev/null || true
+          S5=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Squirrel: $((S4/1024))MB -> $((S5/1024))MB (saved $(((S4-S5)/1024))MB)"
 
-          # 6. Dọn thư mục trống
+          # === 6. Xóa Helper apps ngoại trừ GPU + Renderer (tối thiểu cho Chromium) ===
+          for helper in "${FW}/Electron Framework.framework/"*.app "${FW}/Electron Framework.framework/Helpers/"*.app "${FW}/"*.app; do
+            [ -d "$helper" ] || continue
+            name=$(basename "$helper" .app)
+            case "$name" in
+              *"GPU"*|*"Renderer"*) ;; # Giữ lại — Chromium cần
+              *) rm -rf "$helper"; echo "  -Helper: $name" ;;
+            esac
+          done 2>/dev/null || true
+          S6=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Helpers: $((S5/1024))MB -> $((S6/1024))MB (saved $(((S5-S6)/1024))MB)"
+
+          # === 7. Debug, dSYM, LICENSES, .version, Info.plist rác ===
+          find "${FW}" \( -name "*.dSYM" -o -name "Debug" -o -name "LICENSE*" -o -name "*.version" \) -exec rm -rf {} + 2>/dev/null || true
+          find "${FW}" -name "Info.plist" -not -path "*\.framework/Versions/*/Resources/*" -delete 2>/dev/null || true
+          S7=$(du -sk "${APP_BUNDLE}" | cut -f1); echo ">>> -Debug/Licenses: $((S6/1024))MB -> $((S7/1024))MB (saved $(((S6-S7)/1024))MB)"
+
+          # === 8. Dọn thư mục trống ===
           find "${APP_BUNDLE}/Contents" -type d -empty -delete 2>/dev/null || true
 
-          echo "=== STRIP DONE ==="
-          echo "After strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+          echo ">>> FINAL: $((S7/1024))MB (saved $(((S0-S7)/1024))MB total)"
 
-      - name: Create DMG
+      - name: Create DMG (UDBZ bzip2 — nén mạnh nhất)
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
           DMG_NAME="SENNET_v${APP_VERSION}_mac_arm64"
-          TMP_DMG="/tmp/sennet_tmp.dmg"
 
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # Tạo DMG rỗng trước, copy thủ công + dùng ULFO (lzfse) — nén tốt nhất trên macOS
-          APP_SIZE=$(du -sk "${APP_BUNDLE}" | cut -f1)
-          DMG_SIZE=$((APP_SIZE + 50000))  # thêm 50MB buffer
+          # Dùng UDBZ (bzip2) cho tỉ lệ nén cao nhất
+          echo "Creating DMG with UDBZ compression..."
+          hdiutil create -volname "SENNET" \
+            -srcfolder "${APP_BUNDLE}" \
+            -ov -format UDBZ \
+            "output/${DMG_NAME}.dmg"
 
-          echo "Creating ${DMG_NAME}.dmg (ULFO/lzfse compression)..."
-          hdiutil create -size ${DMG_SIZE}k -fs HFS+ -volname "SENNET" -attach "${TMP_DMG}"
-
-          # Tìm mount point
-          MOUNT_POINT=$(hdiutil info | grep "/Volumes/SENNET" | awk '{print $NF}')
-          if [ -z "$MOUNT_POINT" ]; then
-            MOUNT_POINT="/Volumes/SENNET"
-          fi
-
-          # Copy files vào DMG
-          cp -R "${APP_BUNDLE}" "${MOUNT_POINT}/" 2>/dev/null || true
-
-          # Tạo symlink đến /Applications (để user kéo thả)
-          ln -s /Applications "${MOUNT_POINT}/Applications" 2>/dev/null || true
-
-          # Unmount
-          hdiutil detach "${MOUNT_POINT}" -force 2>/dev/null || true
-
-          # Convert sang ULFO compressed read-only
-          hdiutil convert "${TMP_DMG}" -format ULFO -o "output/${DMG_NAME}.dmg"
-          rm -f "${TMP_DMG}"
-
-          echo "DMG created: output/${DMG_NAME}.dmg"
-          ls -la "output/${DMG_NAME}.dmg"
+          echo "DMG: $(ls -la "output/${DMG_NAME}.dmg" | awk '{print $5}') bytes"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
