@@ -45,6 +45,12 @@ jobs:
       - name: Install ASAR tool
         run: npm install -g @electron/asar
 
+      - name: Install npm dependencies (CẦN cho app hoạt động)
+        run: |
+          cd sennetv1mac/extracted/app_source
+          npm install --production 2>&1 || true
+          echo "node_modules size: $(du -sh node_modules | cut -f1)"
+
       - name: Create .app bundle structure
         run: |
           cd sennetv1mac
@@ -53,7 +59,7 @@ jobs:
           mkdir -p "${APP_BUNDLE}/Contents/Resources/extra/static/icons"
           mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
 
-          # Pack app.asar từ source code
+          # Pack app.asar từ source code (bao gồm node_modules vừa cài)
           cd extracted/app_source
           npx asar pack . "../../${APP_BUNDLE}/Contents/Resources/app.asar"
           cd ../..
@@ -172,7 +178,7 @@ jobs:
 
           echo ">>> FINAL: $((S3/1024))MB (total saved: $(((S0-S3)/1024))MB)"
 
-      - name: Package — DMG + 7z nén cực đại
+      - name: Package — DMG (có /Applications symlink) + 7z
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
@@ -183,15 +189,22 @@ jobs:
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # 1. Tạo DMG (UDBZ — cho Mac thuần)
-          echo "--- Creating DMG (UDBZ) ---"
-          hdiutil create -volname "SENNET" \
-            -srcfolder "${APP_BUNDLE}" \
-            -ov -format UDBZ \
-            "output/${ARM64_DMG}"
+          # 1. Tạo DMG với /Applications symlink để kéo thả
+          echo "--- Creating DMG with /Applications symlink ---"
+          TMP_DMG="/tmp/sennet_tmp.dmg"
+          APP_SIZE=$(du -sk "${APP_BUNDLE}" | cut -f1)
+          DMG_SIZE=$((APP_SIZE + 100000))
+          hdiutil create -size ${DMG_SIZE}k -fs HFS+ -volname "SENNET" -attach "${TMP_DMG}"
+          MOUNT_POINT=$(hdiutil info | grep "/Volumes/SENNET" | awk '{print $NF}')
+          [ -z "$MOUNT_POINT" ] && MOUNT_POINT="/Volumes/SENNET"
+          cp -R "${APP_BUNDLE}" "${MOUNT_POINT}/"
+          ln -s /Applications "${MOUNT_POINT}/Applications"
+          hdiutil detach "${MOUNT_POINT}" -force
+          hdiutil convert "${TMP_DMG}" -format UDBZ -o "output/${ARM64_DMG}"
+          rm -f "${TMP_DMG}"
           ls -la "output/${ARM64_DMG}"
 
-          # 2. Tạo 7z (LZMA2 — nén mạnh hơn nhiều, dùng cho người muốn file nhỏ)
+          # 2. Tạo 7z (LZMA2 ultra)
           echo "--- Creating 7z (LZMA2 ultra) ---"
           brew install p7zip 2>/dev/null || true
           if command -v 7z &>/dev/null; then
