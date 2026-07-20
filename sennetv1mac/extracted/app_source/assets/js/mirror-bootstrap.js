@@ -26,6 +26,8 @@
 
     var PANEL_DOMAINS = [
         'https://kio.senviet.us',
+        'https://appsenviet.htb991.space',
+        'https://htb991.space',
         'https://mirrorhk1.scdh2268.com',
         'https://mirrorhk2.scdh2268.com',
         'https://mirrorhk3.scdh2268.com',
@@ -36,6 +38,8 @@
 
     var SUBSCRIBE_HOSTS = [
         'venom.cdy.892.htd892.com',
+        'appsenviet.htb991.space',
+        'htb991.space',
         'submirror1.scdh2268.com',
         'submirror2.scdh2268.com',
         'submirror3.scdh2268.com',
@@ -402,27 +406,25 @@
 
     function blockUpdateDialog() {
         // CSS để ẩn update dialog — dùng !important để ghi đè mọi style
+        // FIX: KHÔNG dùng [class*="update"] vì sẽ ẩn nhầm các UI element hợp lệ
+        //      (vd: status update, form update button, v.v.)
+        //      Chỉ ẩn các class dialog/modal cụ thể liên quan đến update
         var css = '\
-            /* Ẩn dialog/modal chứa text "new version" hoặc "update" */ \
-            .el-message-box__wrapper, \
-            .el-dialog__wrapper, \
+            /* Ẩn dialog chứa class update-dialog hoặc version-dialog */ \
             .update-dialog, \
             .version-dialog, \
-            [class*="update"], \
-            [class*="newVersion"], \
             .modal-update, \
-            .dialog-update { \
+            .dialog-update, \
+            .el-message-box__wrapper.update-available { \
                 display: none !important; \
                 visibility: hidden !important; \
                 pointer-events: none !important; \
                 z-index: -9999 !important; \
                 opacity: 0 !important; \
             } \
-            /* Ẩn overlay/mask của dialog */ \
-            .v-modal, \
-            .el-overlay, \
-            .modal-mask, \
-            .dialog-mask { \
+            /* Ẩn overlay/mask của dialog (chỉ ẩn khi dialog update bị ẩn) */ \
+            .v-modal:has(+ .update-dialog), \
+            .el-overlay:has(+ .el-message-box__wrapper.update-available) { \
                 display: none !important; \
             } \
         ';
@@ -432,41 +434,56 @@
         document.head.appendChild(style);
 
         // MutationObserver — quét và ẩn dialog update xuất hiện sau này
+        // FIX: KHÔNG dùng characterData:true (gây quét toàn bộ DOM khi Vue render text)
+        // FIX: KHÔNG dùng querySelectorAll('*') (quá chậm khi DOM lớn)
+        // FIX: Debounce 500ms để tránh quét liên tục trong lúc Vue render
+        // FIX: KHÔNG gọi el.remove() để tránh observer tự kích hoạt lại (infinite loop)
+        var _observerDebounceTimer = null;
+        var _observerDebounceMs = 500;
+
         var observer = new MutationObserver(function (mutations) {
-            // Tìm element chứa text "new version" hoặc "update"
-            var allElements = document.querySelectorAll('*');
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var text = (el.textContent || '').toLowerCase();
-                var className = (el.className || '').toString().toLowerCase();
-
-                // Phát hiện dialog update qua text hoặc class
-                if ((text.indexOf('new version') !== -1 ||
-                     text.indexOf('new version found') !== -1 ||
-                     text.indexOf('cập nhật') !== -1 ||
-                     text.indexOf('phiên bản mới') !== -1 ||
-                     text.indexOf('đã có bản cập nhật') !== -1) &&
-                    (className.indexOf('dialog') !== -1 ||
-                     className.indexOf('modal') !== -1 ||
-                     className.indexOf('message') !== -1 ||
-                     className.indexOf('popup') !== -1 ||
-                     className.indexOf('notification') !== -1 ||
-                     el.tagName === 'DIALOG')) {
-
-                    console.log('[MirrorBootstrap] Hiding update dialog:', el.className || el.tagName);
-                    el.style.display = 'none';
-                    el.style.visibility = 'hidden';
-                    el.remove();
-                }
+            // Debounce: chỉ quét sau khi DOM ngừng thay đổi 500ms
+            if (_observerDebounceTimer) {
+                clearTimeout(_observerDebounceTimer);
             }
+            _observerDebounceTimer = setTimeout(function () {
+                _observerDebounceTimer = null;
+                // Chỉ tìm các element dialog/modal cụ thể (không quét toàn bộ DOM)
+                var dialogElements = document.querySelectorAll(
+                    '.el-message-box, .el-dialog, .el-message, .el-notification, ' +
+                    '[class*="dialog"], [class*="modal"], [class*="popup"], ' +
+                    'dialog, [role="dialog"], [role="alertdialog"]'
+                );
+                for (var i = 0; i < dialogElements.length; i++) {
+                    var el = dialogElements[i];
+                    // Bỏ qua nếu element đã bị ẩn hoặc xóa
+                    if (!el.isConnected || el.style.display === 'none') continue;
+
+                    var text = (el.textContent || '').toLowerCase();
+
+                    // Phát hiện dialog update qua text
+                    if (text.indexOf('new version') !== -1 ||
+                        text.indexOf('new version found') !== -1 ||
+                        text.indexOf('cập nhật') !== -1 ||
+                        text.indexOf('phiên bản mới') !== -1 ||
+                        text.indexOf('đã có bản cập nhật') !== -1) {
+
+                        console.log('[MirrorBootstrap] Hiding update dialog:', el.className || el.tagName);
+                        // Ẩn thay vì xóa để tránh infinite loop
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.setAttribute('data-mirror-hidden', 'true');
+                    }
+                }
+            }, _observerDebounceMs);
         });
 
-        // Bắt đầu observe khi DOM sẵn sàng
+        // Bắt đầu observe khi DOM sẵn sàng — CHỈ observe childList (KHÔNG characterData)
         if (document.body) {
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+            observer.observe(document.body, { childList: true, subtree: true });
         } else {
             document.addEventListener('DOMContentLoaded', function () {
-                observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                observer.observe(document.body, { childList: true, subtree: true });
             });
         }
 
@@ -663,11 +680,36 @@
             init._mirrorRetryCount = retryCount;
             var maxRetries = PANEL_DOMAINS.length;
 
+            // === DEFAULT TIMEOUT 15s ===
+            // Fix: fetch() trong Electron KHÔNG có timeout mặc định.
+            // Nếu server không phản hồi, request treo vĩnh viễn → app kẹt ở màn hình loading.
+            // Dùng AbortController để tự động abort sau 15 giây.
+            // Nếu request đã có signal riêng (vd: app tự set AbortController), tôn trọng signal đó.
+            // Nếu request có timeout cũ (custom property), dùng giá trị đó.
+            var hasExistingSignal = !!init.signal;
+            var effectiveTimeout = init._mirrorTimeout || 15000; // Mặc định 15s
+
+            if (!hasExistingSignal) {
+                // Tạo AbortController với timeout
+                var abortController = new AbortController();
+                var timeoutId = setTimeout(function () {
+                    abortController.abort();
+                }, effectiveTimeout);
+                init.signal = abortController.signal;
+                init._mirrorAbortTimeoutId = timeoutId;
+            }
+            // === END DEFAULT TIMEOUT ===
+
             // Gọi fetch gốc — DÙNG call(this, input, init) thay vì apply(this, arguments)
             // Vì trong strict mode, arguments KHÔNG được cập nhật khi gán lại init
             // Nếu app gọi fetch(url) không có init, arguments chỉ có 1 phần tử
             // → init đã sửa (có headers x-hwid) sẽ bị MẤT nếu dùng apply(this, arguments)
             return _origFetch.call(this, input, init).then(function (response) {
+                // Clear timeout nếu request thành công
+                if (init._mirrorAbortTimeoutId) {
+                    clearTimeout(init._mirrorAbortTimeoutId);
+                }
+
                 // Phát hiện authentication thành công — tìm token trong response
                 if (!_deviceReported && response.ok && url && url.indexOf('http') === 0) {
                     var cloned = response.clone();
@@ -688,6 +730,11 @@
 
                 return response;
             }, function (error) {
+                // Clear timeout nếu request thất bại
+                if (init._mirrorAbortTimeoutId) {
+                    clearTimeout(init._mirrorAbortTimeoutId);
+                }
+
                 // === MIRROR DOMAIN RETRY ===
                 // Nếu request thất bại (network error, timeout) và chưa hết retry
                 // → thử lại với mirror domain tiếp theo
@@ -714,9 +761,11 @@
                         if (init.hasOwnProperty(k)) newInit[k] = init[k];
                     }
                     newInit._mirrorRetryCount = retryCount;
-                    if (!newInit.timeout && !newInit.signal) {
-                        newInit.timeout = (init.timeout || 10000) + 5000;
-                    }
+                    // Tăng timeout cho lần retry: 15s → 20s → 25s...
+                    newInit._mirrorTimeout = effectiveTimeout + 5000;
+                    // Bỏ signal cũ để retry với signal mới
+                    delete newInit.signal;
+                    delete newInit._mirrorAbortTimeoutId;
 
                     console.log('[MirrorBootstrap] Fetch FAILED — retry #' + retryCount +
                         ' with mirror:', newUrl);

@@ -15,15 +15,12 @@
     // ============================================================
 
     var blockCSS = '\
-        /* Ẩn dialog chứa text "new version" hoặc "update" */ \
-        .el-message-box__wrapper, \
-        .el-dialog__wrapper, \
+        /* Ẩn dialog chứa class update-dialog hoặc version-dialog */ \
         .update-dialog, \
         .version-dialog, \
-        [class*="update"], \
-        [class*="newVersion"], \
         .modal-update, \
-        .dialog-update { \
+        .dialog-update, \
+        .el-message-box__wrapper.update-available { \
             display: none !important; \
             visibility: hidden !important; \
             pointer-events: none !important; \
@@ -31,10 +28,8 @@
             opacity: 0 !important; \
         } \
         /* Ẩn overlay/mask của dialog */ \
-        .v-modal, \
-        .el-overlay, \
-        .modal-mask, \
-        .dialog-mask { \
+        .v-modal:has(+ .update-dialog), \
+        .el-overlay:has(+ .el-message-box__wrapper.update-available) { \
             display: none !important; \
         } \
     ';
@@ -51,39 +46,52 @@
     // ============================================================
 
     function startDOMScanner() {
+        // FIX: Debounce 500ms — tránh quét DOM liên tục khi Vue render
+        // FIX: KHÔNG dùng querySelectorAll('*') — chỉ quét dialog/modal
+        // FIX: KHÔNG gọi el.remove() — ẩn bằng CSS để tránh infinite loop
+        var _debounceTimer = null;
+
         var observer = new MutationObserver(function () {
-            var allElements = document.querySelectorAll('*');
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var text = (el.textContent || '').toLowerCase();
-                var className = (el.className || '').toString().toLowerCase();
-
-                // Phát hiện dialog update qua text hoặc class
-                if ((text.indexOf('new version') !== -1 ||
-                     text.indexOf('new version found') !== -1 ||
-                     text.indexOf('cập nhật') !== -1 ||
-                     text.indexOf('phiên bản mới') !== -1 ||
-                     text.indexOf('đã có bản cập nhật') !== -1) &&
-                    (className.indexOf('dialog') !== -1 ||
-                     className.indexOf('modal') !== -1 ||
-                     className.indexOf('message') !== -1 ||
-                     className.indexOf('popup') !== -1 ||
-                     className.indexOf('notification') !== -1 ||
-                     el.tagName === 'DIALOG')) {
-
-                    console.log('[PreloadBlocker] Removing update dialog:', el.className || el.tagName);
-                    el.style.display = 'none';
-                    el.style.visibility = 'hidden';
-                    el.remove();
-                }
+            if (_debounceTimer) {
+                clearTimeout(_debounceTimer);
             }
+            _debounceTimer = setTimeout(function () {
+                _debounceTimer = null;
+                // Chỉ tìm các element dialog/modal cụ thể
+                var dialogElements = document.querySelectorAll(
+                    '.el-message-box, .el-dialog, .el-message, .el-notification, ' +
+                    '[class*="dialog"], [class*="modal"], [class*="popup"], ' +
+                    'dialog, [role="dialog"], [role="alertdialog"]'
+                );
+                for (var i = 0; i < dialogElements.length; i++) {
+                    var el = dialogElements[i];
+                    if (!el.isConnected || el.style.display === 'none') continue;
+
+                    var text = (el.textContent || '').toLowerCase();
+
+                    // Phát hiện dialog update qua text
+                    if (text.indexOf('new version') !== -1 ||
+                        text.indexOf('new version found') !== -1 ||
+                        text.indexOf('cập nhật') !== -1 ||
+                        text.indexOf('phiên bản mới') !== -1 ||
+                        text.indexOf('đã có bản cập nhật') !== -1) {
+
+                        console.log('[PreloadBlocker] Removing update dialog:', el.className || el.tagName);
+                        // Ẩn bằng CSS thay vì xóa — tránh infinite loop
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.setAttribute('data-preload-hidden', 'true');
+                    }
+                }
+            }, 500); // Debounce 500ms
         });
 
         if (document.body) {
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+            // FIX: CHỈ observe childList (KHÔNG characterData)
+            observer.observe(document.body, { childList: true, subtree: true });
         } else {
             document.addEventListener('DOMContentLoaded', function () {
-                observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                observer.observe(document.body, { childList: true, subtree: true });
             });
         }
     }
