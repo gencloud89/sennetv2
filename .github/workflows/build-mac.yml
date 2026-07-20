@@ -178,28 +178,13 @@ jobs:
 
           echo ">>> FINAL: $((S3/1024))MB (total saved: $(((S0-S3)/1024))MB)"
 
-      - name: Package — DMG với /Applications symlink
+      - name: Package DMG
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
           V="${APP_VERSION}"
-
-          # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
-
-          # Tạo thư mục tạm với .app + /Applications symlink
-          TMPDIR="/tmp/sennet_dmg"
-          rm -rf "${TMPDIR}"
-          mkdir -p "${TMPDIR}"
-          cp -R "${APP_BUNDLE}" "${TMPDIR}/"
-          ln -s /Applications "${TMPDIR}/Applications"
-
-          # Tạo DMG
-          hdiutil create -volname "SENNET" \
-            -srcfolder "${TMPDIR}" \
-            -ov -format UDBZ \
-            "output/SENNET_v${V}_mac_arm64.dmg"
-          rm -rf "${TMPDIR}"
+          hdiutil create -volname "SENNET" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "output/SENNET_v${V}_mac_arm64.dmg"
           ls -la "output/SENNET_v${V}_mac_arm64.dmg"
 
       - name: Upload DMG
