@@ -30,12 +30,6 @@
 	<string>11.0</string>
 	<key>NSRequiresAquaSystemAppearance</key>
 	<false/>
-	<!-- Network Extension (VPN) -->
-	<key>NEProviderClasses</key>
-	<dict>
-		<key>NETunnelProvider</key>
-		<string>SENNET</string>
-	</dict>
 	<!-- Allow outgoing connections -->
 	<key>NSAppTransportSecurity</key>
 	<dict>

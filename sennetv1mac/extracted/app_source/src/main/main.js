@@ -78,13 +78,19 @@ const _appname = 'Gudao',
   geositePath = path.join(appConfigDir, 'geosite.db'),
   configPath = path.join(appConfigDir, 'config.json'),
   configPath2 = path.join(__libname, 'extra/config.json'),
-  libcorePath = path.join(appConfigDir, 'libcore.exe'),
   sysproxyPath = path.join(appConfigDir, 'sysproxy.exe'),
   userConfigDir = app.getPath('userData')
-var tun2socksPath = path.join(__libname, 'extra/libcore.exe'),
-  tun2socksToolPath = path.resolve(userConfigDir, 'libcore.exe')
+// Mac: dùng libcore (không .exe), Windows: libcore.exe
+var libcoreName = isMac ? 'libcore' : 'libcore.exe'
+var libcorePath = path.join(appConfigDir, libcoreName)
+var tun2socksPath = path.join(__libname, 'extra', libcoreName),
+  tun2socksToolPath = path.resolve(userConfigDir, libcoreName)
 let winToolPath
-isWin && (winToolPath = path.join(__libname, '/extra/sysproxy.exe'))
+if (isMac) {
+  winToolPath = null  // Mac không dùng sysproxy.exe
+} else if (isWin) {
+  winToolPath = path.join(__libname, '/extra/sysproxy.exe')
+}
 var userKey = '',
   serverLoad = '',
   serverConnected = '',
@@ -181,7 +187,7 @@ function createWindow() {
 		  devTools: true
         },
       })),
-      mainWindow.webContents.setUserAgent('windows.v2board.app 2.0'),
+      mainWindow.webContents.setUserAgent('macos.v2board.app 2.0'),
       mainWindow.loadFile('app.html'))
     : ((mainWindow = new BrowserWindow({
         width: 720,
@@ -204,7 +210,7 @@ function createWindow() {
 		  devTools: true
         },
       })),
-      mainWindow.webContents.setUserAgent('windows.v2board.app 2.0'),
+      mainWindow.webContents.setUserAgent('macos.v2board.app 2.0'),
       mainWindow.loadFile('app.html'))
   mainWindow.on('close', (_0x55afdd) => {
     !isQuiting() && (_0x55afdd.preventDefault(), mainWindow.hide())
@@ -397,14 +403,51 @@ const logger = tracer.console({
   },
 })
 function setProxy(_0x8f8ad7) {
-  let _0x404612 = path.join(appConfigDir, 'sysproxy.exe')
-  var _0x3f692d = ''
-  _0x8f8ad7
-    ? (_0x3f692d = '"' + _0x404612 + '" global 127.0.0.1:10090 ""')
-    : (_0x3f692d = '"' + _0x404612 + '" pac ""')
-  cps.execSync(_0x3f692d)
-  console.log('proxy: ' + _0x3f692d)
-  logger.info('proxy: ' + _0x3f692d)
+  if (isMac) {
+    // macOS: dùng networksetup để set/tắt system proxy
+    // Lấy tên network service (thường là Wi-Fi hoặc Ethernet)
+    var networkService = 'Wi-Fi'
+    try {
+      var services = cps.execSync('networksetup -listallnetworkservices', { encoding: 'utf8' })
+      var lines = services.split('\n').filter(function (l) { return l.trim().length > 0 && l.indexOf('*') === -1 })
+      for (var i = 0; i < lines.length; i++) {
+        var s = lines[i].trim()
+        if (s.indexOf('Wi-Fi') !== -1 || s.indexOf('Ethernet') !== -1 || s.indexOf('USB') !== -1) {
+          networkService = s
+          break
+        }
+      }
+      if (lines.length > 1) networkService = lines[1].trim() // Fallback: service thứ 2 (bỏ qua dòng header)
+    } catch (e) {
+      networkService = 'Wi-Fi'
+    }
+
+    if (_0x8f8ad7) {
+      // Bật proxy HTTP + HTTPS + SOCKS
+      cps.execSync('networksetup -setwebproxy "' + networkService + '" 127.0.0.1 10090', { encoding: 'utf8' })
+      cps.execSync('networksetup -setsecurewebproxy "' + networkService + '" 127.0.0.1 10090', { encoding: 'utf8' })
+      cps.execSync('networksetup -setsocksfirewallproxy "' + networkService + '" 127.0.0.1 10090', { encoding: 'utf8' })
+      console.log('proxy: Mac proxy ON via ' + networkService)
+      logger.info('proxy: Mac proxy ON via ' + networkService)
+    } else {
+      // Tắt proxy
+      cps.execSync('networksetup -setwebproxystate "' + networkService + '" off', { encoding: 'utf8' })
+      cps.execSync('networksetup -setsecurewebproxystate "' + networkService + '" off', { encoding: 'utf8' })
+      cps.execSync('networksetup -setsocksfirewallproxystate "' + networkService + '" off', { encoding: 'utf8' })
+      console.log('proxy: Mac proxy OFF via ' + networkService)
+      logger.info('proxy: Mac proxy OFF via ' + networkService)
+    }
+  } else {
+    // Windows: dùng sysproxy.exe
+    let _0x404612 = path.join(appConfigDir, 'sysproxy.exe')
+    var _0x3f692d = ''
+    _0x8f8ad7
+      ? (_0x3f692d = '"' + _0x404612 + '" global 127.0.0.1:10090 ""')
+      : (_0x3f692d = '"' + _0x404612 + '" pac ""')
+    cps.execSync(_0x3f692d)
+    console.log('proxy: ' + _0x3f692d)
+    logger.info('proxy: ' + _0x3f692d)
+  }
 }
 async function initConfig() {
   return new Promise(async function (_0xe3d8df) {
@@ -417,7 +460,8 @@ async function initConfig() {
           (tun2socksToolPath = path.resolve(userConfigDir, 'libcore.exe'))),
       !fs.existsSync(appConfigDir) &&
         (await ensureDir(appConfigDir), logger.info('SystemFolderCreated')),
-      !fs.existsSync(sysproxyPath) &&
+      // Windows: copy sysproxy.exe — Mac không cần (dùng networksetup)
+      !isMac && !fs.existsSync(sysproxyPath) &&
         fs.copyFile(
           path.join(__libname, 'extra/sysproxy.exe'),
           path.join(appConfigDir, 'sysproxy.exe'),
@@ -428,9 +472,10 @@ async function initConfig() {
             logger.info('sysproxy.exe copy done')
           }
         ),
+      // Copy native binary (libcore.exe cho Windows, libcore cho Mac)
       fs.copyFile(
-        path.join(__libname, 'extra/libcore.exe'),
-        path.join(appConfigDir, 'libcore.exe'),
+        path.join(__libname, 'extra', libcoreName),
+        path.join(appConfigDir, libcoreName),
         (_0x236421) => {
           if (_0x236421) {
             throw _0x236421
@@ -479,21 +524,22 @@ function getExeLocation() {
 }
 const getResource = (_0x22f73a) => {
   let _0x53bccf = ''
-  return (
-    isWin &&
-      (app.isPackaged
-        ? (_0x53bccf = path.join(process.cwd(), '/resources/extra'))
-        : (_0x53bccf = path.join(process.cwd(), '/extra'))),
-    _0x22f73a && (_0x53bccf = path.join(_0x53bccf, _0x22f73a)),
-    _0x53bccf
-  )
+  if (isMac) {
+    _0x53bccf = app.isPackaged
+      ? path.join(process.cwd(), '/resources/extra')
+      : path.join(process.cwd(), '/extra')
+  } else if (isWin) {
+    _0x53bccf = app.isPackaged
+      ? path.join(process.cwd(), '/resources/extra')
+      : path.join(process.cwd(), '/extra')
+  }
+  _0x22f73a && (_0x53bccf = path.join(_0x53bccf, _0x22f73a))
+  return _0x53bccf
 }
 async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
-  let _0x2f9277 = path.join(appConfigDir, 'libcore.exe')
+  let _0x2f9277 = path.join(appConfigDir, libcoreName)
   const _0x3c818b = '"' + _0x2f9277 + '" run -D "' + appConfigDir + '"'
   sudo.exec(_0x3c818b, { name: 'My App' })
-  const _0x200149 = 'libcore.exe',
-    _0x13983a = 'tasklist /FI "IMAGENAME eq ' + _0x200149 + '"'
   coreServer = cps.exec(_0x3c818b)
   logger.info('run: ' + _0x3c818b)
   coreServer.stdout.on('data', (_0x4ebb8f) => {
@@ -535,8 +581,18 @@ async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
 }
 function NotTunkillCoreProcess() {
   return new Promise((_0xb3107a) => {
-    let _0x5d4efd = 'cmd /k taskkill /f /im libcore.exe'
-    cps.exec(_0x5d4efd)
+    if (isMac) {
+      // Mac: dùng pkill để kill process theo tên
+      try {
+        cps.execSync('pkill -f libcore 2>/dev/null || true', { encoding: 'utf8' })
+      } catch (e) {
+        // pkill trả về lỗi nếu không tìm thấy process — bỏ qua
+      }
+    } else {
+      // Windows: dùng taskkill
+      let _0x5d4efd = 'cmd /k taskkill /f /im libcore.exe'
+      cps.exec(_0x5d4efd)
+    }
     setProxy()
     coreServer != null &&
       (console.log('Kill Core:' + coreServer.pid), coreServer.kill())
@@ -547,32 +603,52 @@ function NotTunkillCoreProcess() {
 }
 function killCoreProcess() {
   return new Promise((_0x1bb740, _0x52d93b) => {
-    const _0x30d043 = 'libcore.exe',
-      _0x29334e = 'tasklist /FI "IMAGENAME eq ' + _0x30d043 + '"'
-    cps.exec(_0x29334e, (_0x3663df, _0x590145) => {
-      !_0x3663df && _0x590145.includes(_0x30d043)
-        ? (console.log(_0x30d043 + ' is run'),
-          sudo.exec(
-            'taskkill /F /IM libcore.exe',
-            { name: 'App' },
-            (_0x74736c, _0x435ded, _0x537f3a) => {
-              if (_0x74736c) {
-                const _0x2a2d36 = _0x74736c.toString()
-                _0x2a2d36.includes('The process "libcore.exe" not found')
-                  ? (console.log('Not found libcore'), _0x1bb740(_0x435ded))
-                  : (console.error('ErrorMessage:', _0x2a2d36),
-                    _0x52d93b(_0x74736c))
-              } else {
-                _0x435ded.includes(
-                  'SUCCESS: The process "libcore.exe" with PID'
-                ) &&
-                  (console.log('libcore has been kill'), _0x1bb740(_0x435ded))
-                _0x1bb740(_0x435ded)
+    if (isMac) {
+      // Mac: dùng pgrep + pkill
+      try {
+        var result = cps.execSync('pgrep -f libcore 2>/dev/null || true', { encoding: 'utf8' })
+        if (result.trim().length > 0) {
+          console.log('libcore is run, killing...')
+          cps.execSync('pkill -f libcore', { encoding: 'utf8' })
+          console.log('libcore has been kill')
+          _0x1bb740('SUCCESS')
+        } else {
+          console.log('libcore not run')
+          _0x1bb740('not running')
+        }
+      } catch (e) {
+        console.log('libcore not found (exception)')
+        _0x1bb740('not running')
+      }
+    } else {
+      // Windows: dùng tasklist + taskkill
+      const _0x30d043 = 'libcore.exe',
+        _0x29334e = 'tasklist /FI "IMAGENAME eq ' + _0x30d043 + '"'
+      cps.exec(_0x29334e, (_0x3663df, _0x590145) => {
+        !_0x3663df && _0x590145.includes(_0x30d043)
+          ? (console.log(_0x30d043 + ' is run'),
+            sudo.exec(
+              'taskkill /F /IM libcore.exe',
+              { name: 'App' },
+              (_0x74736c, _0x435ded, _0x537f3a) => {
+                if (_0x74736c) {
+                  const _0x2a2d36 = _0x74736c.toString()
+                  _0x2a2d36.includes('The process "libcore.exe" not found')
+                    ? (console.log('Not found libcore'), _0x1bb740(_0x435ded))
+                    : (console.error('ErrorMessage:', _0x2a2d36),
+                      _0x52d93b(_0x74736c))
+                } else {
+                  _0x435ded.includes(
+                    'SUCCESS: The process "libcore.exe" with PID'
+                  ) &&
+                    (console.log('libcore has been kill'), _0x1bb740(_0x435ded))
+                  _0x1bb740(_0x435ded)
+                }
               }
-            }
-          ))
-        : (console.log(_0x30d043 + ' not run'), _0x1bb740(_0x590145))
-    })
+            ))
+          : (console.log(_0x30d043 + ' not run'), _0x1bb740(_0x590145))
+      })
+    }
   }).catch((_0xd087ef) => {
     return _0xd087ef
   })
@@ -624,7 +700,7 @@ function initProxyHelper() {
               tun2socksPath +
               ' "' +
               tun2socksToolPath +
-              '" && chown root:admin "' +
+              '" && chown root:wheel "' +
               tun2socksToolPath +
               '" && chmod a+rx "' +
               tun2socksToolPath +

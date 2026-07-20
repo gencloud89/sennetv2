@@ -106,7 +106,7 @@ fi
 DMG_NAME="SENNET_v${VERSION}_mac_x64"
 hdiutil create -volname "${APP_NAME}" \
     -srcfolder "${APP_BUNDLE}" \
-    -ov -format UDZO \
+    -ov -format ULFO \
     "${PROJECT_DIR}/output/${DMG_NAME}.dmg"
 
 echo ""

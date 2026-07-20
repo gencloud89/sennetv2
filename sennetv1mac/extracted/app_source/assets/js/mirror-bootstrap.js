@@ -1,5 +1,5 @@
 /**
- * mirror-bootstrap.js — Domain Mirror + HWID Fix cho SENNET VPN Windows
+ * mirror-bootstrap.js — Domain Mirror + HWID Fix cho SENNET VPN macOS
  * ==================================================================
  * Chức năng:
  *   1. Domain panel & subscribe mirror (china-mirror-guide.md)
@@ -139,12 +139,12 @@
             hash |= 0;
         }
 
-        // Format: WIN-XXXXXXXX (ngắn gọn, dễ đọc trong panel)
+        // Format: MAC-XXXXXXXX (ngắn gọn, dễ đọc trong panel)
         // Panel normalizeHwid cắt 128 chars nên ta giữ format ngắn
         var h = Math.abs(hash).toString(16).toUpperCase();
         while (h.length < 8) h = '0' + h;
         var shortHost = (parts[0] || 'UNKNOWN').replace(/[^a-zA-Z0-9]/g, '').substring(0, 8).toUpperCase();
-        return 'WIN-' + shortHost + '-' + h.substring(0, 8);
+        return 'MAC-' + shortHost + '-' + h.substring(0, 8);
     }
 
     function getOrCreateHWID() {
@@ -175,16 +175,16 @@
         try {
             var os = require('os');
             return {
-                device_name: os.hostname() || 'Windows PC',
-                platform: os.platform() + ' ' + os.arch(),  // win32 x64
-                user_agent: navigator.userAgent || 'windows.v2board.app 2.0',
+                device_name: os.hostname() || 'Mac',
+                platform: os.platform() + ' ' + os.arch(),  // darwin arm64
+                user_agent: navigator.userAgent || 'macos.v2board.app 2.0',
                 os_release: os.release()
             };
         } catch (e) {
             return {
-                device_name: 'Windows PC',
-                platform: 'win32',
-                user_agent: navigator.userAgent || 'windows.v2board.app 2.0'
+                device_name: 'Mac',
+                platform: 'darwin',
+                user_agent: navigator.userAgent || 'macos.v2board.app 2.0'
             };
         }
     }
@@ -529,7 +529,7 @@
                         axios.get(subscribeUrl + params, {
                             headers: {
                                 'x-hwid': hwid,
-                                'User-Agent': navigator.userAgent || 'windows.v2board.app 2.0'
+                                'User-Agent': navigator.userAgent || 'macos.v2board.app 2.0'
                             },
                             timeout: 15000
                         }).then(function (res) {
@@ -737,7 +737,7 @@
             'x-hwid': hwid,
             'X-Device-Name': meta.device_name,
             'X-Device-Platform': meta.platform,
-            'User-Agent': navigator.userAgent || 'windows.v2board.app 2.0'
+            'User-Agent': navigator.userAgent || 'macos.v2board.app 2.0'
         };
 
         var doReport = function () {
@@ -748,7 +748,7 @@
             xhr.setRequestHeader('x-hwid', hwid);
             xhr.setRequestHeader('X-Device-Name', meta.device_name);
             xhr.setRequestHeader('X-Device-Platform', meta.platform);
-            xhr.setRequestHeader('User-Agent', navigator.userAgent || 'windows.v2board.app 2.0');
+            xhr.setRequestHeader('User-Agent', navigator.userAgent || 'macos.v2board.app 2.0');
             xhr.timeout = 15000;
 
             xhr.onload = function () {
@@ -801,7 +801,7 @@
     }
 
     function init() {
-        console.log('[MirrorBootstrap] Initializing Windows client v4 (HWID via fetch + x-hwid header)...');
+        console.log('[MirrorBootstrap] Initializing macOS client v4 (HWID via fetch + x-hwid header)...');
 
         // KHÔNG tự động set APP_API_URL — người dùng tự cấu hình
         var existingUrl = getCurrentPanelUrl();

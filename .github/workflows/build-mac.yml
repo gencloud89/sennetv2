@@ -153,12 +153,12 @@ jobs:
             find "$EF/Resources" -type d -empty -delete 2>/dev/null || true
           fi
 
-          # Xóa Chromium Helper apps (chỉ giữ GPU + Renderer)
+          # Xóa Chromium Helper apps không cần thiết (giữ GPU, Renderer, Plugin)
           for helper in "$EF/"*.app "$EF/Helpers/"*.app; do
             if [ -d "$helper" ]; then
               name=$(basename "$helper" .app)
               case "$name" in
-                *"GPU"*|*"Renderer"*) ;; # Giữ lại
+                *"GPU"*|*"Renderer"*|*"Plugin"*) ;; # Giữ lại
                 *) rm -rf "$helper" 2>/dev/null || true
                    echo "  Removed Helper: $name" ;;
               esac
@@ -303,6 +303,33 @@ jobs:
             chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
           fi
 
+      - name: Strip unnecessary Electron files (giảm dung lượng)
+        run: |
+          cd sennetv1mac
+          APP_BUNDLE="output/SENNET_x64.app"
+          echo "Before strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+
+          # Xóa SwiftShader
+          rm -rf "${APP_BUNDLE}/Contents/Frameworks/"*SwiftShader* 2>/dev/null || true
+          rm -f "${APP_BUNDLE}/Contents/Resources/"vk_swiftshader* 2>/dev/null || true
+
+          # Xóa Electron Framework Resources không cần thiết
+          EF="${APP_BUNDLE}/Contents/Frameworks/Electron Framework.framework"
+          if [ -d "$EF/Resources" ]; then
+            find "$EF/Resources" -type f ! -name "*.nib" -delete 2>/dev/null || true
+            find "$EF/Resources" -type d -empty -delete 2>/dev/null || true
+          fi
+
+          # Xóa Debug, dSYM, LICENSES
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.dSYM" -exec rm -rf {} + 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "Debug" -type d -exec rm -rf {} + 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "LICENSE*" -delete 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "*.version" -delete 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -name "Info.plist" -delete 2>/dev/null || true
+          find "${APP_BUNDLE}/Contents/Frameworks" -type d -empty -delete 2>/dev/null || true
+
+          echo "After strip: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+
       - name: Create DMG
         run: |
           cd sennetv1mac
@@ -311,9 +338,10 @@ jobs:
 
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
+          # Dùng ULFO (lzfse) compression — nén tốt hơn UDZO
           hdiutil create -volname "SENNET" \
             -srcfolder "${APP_BUNDLE}" \
-            -ov -format UDZO \
+            -ov -format ULFO \
             "output/${DMG_NAME}.dmg"
 
           ls -la "output/${DMG_NAME}.dmg"
@@ -359,26 +387,45 @@ jobs:
           cd /tmp
 
           # Mount ARM64 DMG
+          echo "Mounting ARM64 DMG..."
           hdiutil attach /tmp/arm64_artifact/*.dmg -mountpoint /tmp/arm64_mnt
           cp -r /tmp/arm64_mnt/SENNET.app /tmp/SENNET_universal.app
+          echo "ARM64 app copied to /tmp/SENNET_universal.app"
           hdiutil detach /tmp/arm64_mnt
 
           # Mount x64 DMG
+          echo "Mounting x64 DMG..."
           hdiutil attach /tmp/x64_artifact/*.dmg -mountpoint /tmp/x64_mnt
 
-          # Tạo universal binary với lipo
+          # Tạo universal binary với lipo (dùng bản copy arm64 từ /tmp/SENNET_universal.app,
+          # không dùng mount point đã detached)
+          echo "Creating universal binary..."
           lipo -create \
-            /tmp/arm64_mnt/SENNET.app/Contents/MacOS/SENNET \
+            /tmp/SENNET_universal.app/Contents/MacOS/SENNET \
             /tmp/x64_mnt/SENNET.app/Contents/MacOS/SENNET \
             -output /tmp/SENNET_universal.app/Contents/MacOS/SENNET
 
+          # Tạo universal libcore nếu có
+          if [ -f /tmp/SENNET_universal.app/Contents/Resources/extra/libcore ] && \
+             [ -f /tmp/x64_mnt/SENNET.app/Contents/Resources/extra/libcore ]; then
+            echo "Creating universal libcore..."
+            lipo -create \
+              /tmp/SENNET_universal.app/Contents/Resources/extra/libcore \
+              /tmp/x64_mnt/SENNET.app/Contents/Resources/extra/libcore \
+              -output /tmp/SENNET_universal.app/Contents/Resources/extra/libcore
+          fi
+
           hdiutil detach /tmp/x64_mnt
 
-          # Tạo DMG universal
+          echo "Universal binary arch:"
+          lipo -info /tmp/SENNET_universal.app/Contents/MacOS/SENNET
+
+          # Tạo DMG universal dùng ULFO compression
           DMG_NAME="SENNET_v${APP_VERSION}_mac_universal"
+          echo "Creating universal DMG with ULFO compression..."
           hdiutil create -volname "SENNET" \
             -srcfolder /tmp/SENNET_universal.app \
-            -ov -format UDZO \
+            -ov -format ULFO \
             "sennetv1mac/output/${DMG_NAME}.dmg"
 
           ls -la "sennetv1mac/output/${DMG_NAME}.dmg"

@@ -82,7 +82,7 @@ DMG_NAME="SENNET_v${VERSION}_mac_universal"
 echo "  Creating ${DMG_NAME}.dmg..."
 hdiutil create -volname "${APP_NAME}" \
     -srcfolder "${UNIVERSAL_APP}" \
-    -ov -format UDZO \
+    -ov -format ULFO \
     "${PROJECT_DIR}/output/${DMG_NAME}.dmg"
 
 echo ""
