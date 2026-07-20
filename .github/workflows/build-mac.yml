@@ -178,50 +178,35 @@ jobs:
 
           echo ">>> FINAL: $((S3/1024))MB (total saved: $(((S0-S3)/1024))MB)"
 
-      - name: Package — DMG (có /Applications symlink) + 7z
+      - name: Package — DMG với /Applications symlink
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
           V="${APP_VERSION}"
-          ARM64_DMG="SENNET_v${V}_mac_arm64.dmg"
-          ARM64_7Z="SENNET_v${V}_mac_arm64.7z"
 
           # Ad-hoc sign
           codesign --force --deep --sign - "${APP_BUNDLE}" 2>/dev/null || true
 
-          # 1. Tạo thư mục tạm với .app + /Applications symlink
+          # Tạo thư mục tạm với .app + /Applications symlink
           TMPDIR="/tmp/sennet_dmg"
           rm -rf "${TMPDIR}"
           mkdir -p "${TMPDIR}"
           cp -R "${APP_BUNDLE}" "${TMPDIR}/"
           ln -s /Applications "${TMPDIR}/Applications"
 
-          # 2. Tạo DMG từ thư mục tạm (NHANH - dùng srcfolder trực tiếp)
-          echo "--- Creating DMG ---"
+          # Tạo DMG
           hdiutil create -volname "SENNET" \
             -srcfolder "${TMPDIR}" \
             -ov -format UDBZ \
-            "output/${ARM64_DMG}"
+            "output/SENNET_v${V}_mac_arm64.dmg"
           rm -rf "${TMPDIR}"
-          ls -la "output/${ARM64_DMG}"
+          ls -la "output/SENNET_v${V}_mac_arm64.dmg"
 
-          # 3. Tạo 7z (LZMA2 ultra)
-          echo "--- Creating 7z ---"
-          brew install p7zip 2>/dev/null || true
-          if command -v 7z &>/dev/null; then
-            7z a -mx9 -md=256m -mfb=273 -ms=on "output/${ARM64_7Z}" "${APP_BUNDLE}"
-            ls -la "output/${ARM64_7Z}"
-          else
-            echo "7z not available, skipping"
-          fi
-
-      - name: Upload DMG + 7z artifacts
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: SENNET_macOS_ARM64
-          path: |
-            sennetv1mac/output/SENNET_v*_mac_arm64.dmg
-            sennetv1mac/output/SENNET_v*_mac_arm64.7z
+          path: sennetv1mac/output/SENNET_v*_mac_arm64.dmg
           retention-days: 30
 
   # ============================================================
