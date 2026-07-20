@@ -21,8 +21,18 @@ const Promise = require('bluebird'),
 var request = require('request'),
   qs = require('querystring'),
   sudo = require('sudo-prompt')
-const { autoUpdater } = require('electron-updater'),
-  { isMac, isWin, isLinux, isDev, isNoPack } = require('./env.js'),
+// electron-updater đã bị xóa khỏi node_modules → dùng stub thay thế
+const autoUpdater = {
+  autoDownload: false,
+  checkForUpdates: function () { console.log('[Update] Disabled'); return Promise.resolve(null); },
+  checkForUpdatesAndNotify: function () { return Promise.resolve(null); },
+  downloadUpdate: function () { return Promise.resolve(null); },
+  quitAndInstall: function () {},
+  on: function () { return this; },
+  once: function () { return this; },
+  removeListener: function () { return this; }
+};
+const { isMac, isWin, isLinux, isDev, isNoPack } = require('./env.js'),
   { net } = require('electron'),
   util = require('util'),
   defaultGateway = require('default-gateway'),
