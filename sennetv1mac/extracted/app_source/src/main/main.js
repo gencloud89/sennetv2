@@ -519,35 +519,49 @@ const logger = tracer.console({
         .write(_0x94d5c.output + '\n', 'utf8')
   },
 })
-// Lấy danh sách NETWORK SERVICES CÓ PHẦN CỨNG THẬT (không phải ảo/VPN)
+// Lấy danh sách NETWORK SERVICES — DÙNG BLOCKLIST (bao gồm mọi interface, chỉ loại trừ VPN ảo)
+// v20: Sửa lỗi proxy set sai interface. Cách cũ dùng allowlist (chỉ hardware ports)
+// → bỏ sót interface internet thật của user (USB LAN, Wi-Fi...). Cách mới: lấy TẤT CẢ,
+// chỉ LOẠI TRỪ các service ảo/VPN đã biết.
 function getActiveNetworkServices() {
   var services = []
   try {
-    // Lấy hardware ports — chỉ services có hardware port MỚI LÀ THẬT
-    var hwOut = cps.execSync('networksetup -listallhardwareports', { encoding: 'utf8' })
-    var realServices = {}
-    var lines = hwOut.split('\n')
-    var currentSvc = null
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i].trim()
-      if (line.indexOf('Hardware Port:') === 0) {
-        currentSvc = line.substring('Hardware Port:'.length).trim()
-      } else if (line.indexOf('Device:') === 0 && currentSvc) {
-        realServices[currentSvc] = line.substring('Device:'.length).trim()
-      }
-    }
-    logger.info('proxy: real hardware services: ' + JSON.stringify(Object.keys(realServices)))
-
-    // Lấy services theo thứ tự ưu tiên, CHỈ giữ services có hardware thật
     var orderOut = cps.execSync('networksetup -listnetworkserviceorder', { encoding: 'utf8' })
     var orderLines = orderOut.split('\n')
+
+    // BLACKLIST: Các service ảo/VPN — case-insensitive
+    var virtualPatterns = [
+      'iphone', 'ipad',           // iOS tethering
+      'shadowrocket',              // VPN app
+      'tailscale',                 // VPN mesh
+      'vpn',                       // Mọi VPN-related
+      'nas',                       // NAS storage
+      'macbook',                   // Hostname-based virtual
+      'bluetooth',                 // Bluetooth PAN
+      'firewire',                  // FireWire (cũ)
+      'thunderbolt bridge',        // Bridge cho 2 máy Mac nối với nhau
+      'thunderbolt ethernet'       // Thunderbolt Ethernet slot
+    ]
+
     for (var j = 0; j < orderLines.length; j++) {
       var match = orderLines[j].match(/^\(\d+\)\s+(.+)$/)
       if (match) {
         var svc = match[1].trim()
-        // CHỈ lấy services có hardware port THẬT (bỏ qua VPN ảo, iPhone tethering...)
-        if (realServices[svc] && svc.indexOf('*') === -1) {
+        if (svc.indexOf('*') !== -1) continue  // Disabled service
+
+        var isVirtual = false
+        var svcLower = svc.toLowerCase()
+        for (var k = 0; k < virtualPatterns.length; k++) {
+          if (svcLower.indexOf(virtualPatterns[k]) !== -1) {
+            isVirtual = true
+            break
+          }
+        }
+
+        if (!isVirtual) {
           services.push(svc)
+        } else {
+          logger.info('proxy: SKIP virtual: ' + svc)
         }
       }
     }
@@ -555,7 +569,7 @@ function getActiveNetworkServices() {
     logger.info('proxy: error detecting services: ' + e.message)
   }
   if (services.length === 0) services.push('Wi-Fi')
-  logger.info('proxy: filtered active services: ' + JSON.stringify(services))
+  logger.info('proxy: active services (' + services.length + '): ' + JSON.stringify(services))
   return services
 }
 
@@ -717,6 +731,7 @@ const getResource = (_0x22f73a) => {
 // được redirect ra file. Monitor này thay thế cho cps.exec stdout/stderr.
 
 var _coreLogMonitor = null  // { stop(), pid, _timer }
+var _coreStarting = false   // Guard chống double-start libcore
 
 function setupCoreLogMonitor(logFile, pidFile) {
   // Dọn dẹp monitor cũ nếu có
@@ -804,6 +819,7 @@ function setupCoreLogMonitor(logFile, pidFile) {
             monitor._started = true
             monitor._startAttempts = 0
             readPid()
+            _coreStarting = false  // v20: Reset guard — libcore đã start xong
             vpnLogToFile('libcore STARTED (pid=' + monitor.pid + ')')
             webContentsSend('coreStatus', 'true')
             console.log('start success:' + monitor.pid)
@@ -837,6 +853,7 @@ function setupCoreLogMonitor(logFile, pidFile) {
       }
       if (monitor._startAttempts > 30) {
         // Sau 30s — coi như failed
+        _coreStarting = false  // v20: Reset guard — start thất bại
         vpnLogToFile('libcore FAILED to start after 30s')
         webContentsSend('coreStatus', 'false')
         monitor._startAttempts = 0
@@ -875,6 +892,14 @@ function setupCoreLogMonitor(logFile, pidFile) {
 }
 
 async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
+  // v20: Guard chống double-start — nếu đang start dở thì bỏ qua
+  if (isMac && _coreStarting) {
+    vpnLogToFile('startClashProcess: SKIP (already starting)')
+    logger.info('startClashProcess: SKIP (already starting)')
+    return
+  }
+  if (isMac) _coreStarting = true
+
   let _0x2f9277 = path.join(appConfigDir, libcoreName)
   const _0x3c818b = '"' + _0x2f9277 + '" run -D "' + appConfigDir + '"'
   vpnLogToFile('startClashProcess: ' + _0x3c818b)
@@ -979,6 +1004,7 @@ function NotTunkillCoreProcess() {
         _coreLogMonitor.stop()
         _coreLogMonitor = null
       }
+      _coreStarting = false  // v20: Reset guard
 
       var services = getActiveNetworkServices()
       // Script stop: kill libcore + tắt proxy

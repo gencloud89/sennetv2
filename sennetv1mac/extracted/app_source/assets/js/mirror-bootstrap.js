@@ -1,12 +1,12 @@
 /**
- * mirror-bootstrap.js — v19-DEBUG cho SENNET VPN macOS
+ * mirror-bootstrap.js — v20-DEBUG cho SENNET VPN macOS
  * ==================================================================
- * VERSION: v19-DEBUG (2026-07-21)
+ * VERSION: v20-DEBUG (2026-07-21)
  *
- * THAY ĐỔI so với v14:
- *   1. 🔧 VPN LOGIC REWRITE — fix double libcore start, root shell deadlock
- *   2. 📡 Port monitoring — kiểm tra port 9790/10090 status
- *   3. 📊 Traffic stats — hiển thị upload/download nếu có
+ * THAY ĐỔI so với v19:
+ *   1. 🔧 FIX PROXY INTERFACE — dùng blocklist thay vì allowlist
+ *   2. 🛡️ Guard double libcore start
+ *   3. 📡 Port monitoring improved
  *
  * Giữ nguyên từ v10:
  *   - Default APP_API_URL = https://kio.senviet.us
@@ -691,7 +691,7 @@
     }
 
     function initDeferred() {
-        console.log('[MirrorBootstrap v19] === DEFERRED INIT START ===');
+        console.log('[MirrorBootstrap v20] === DEFERRED INIT START ===');
 
         // 5. Block update dialogs (cần document.head và document.body)
         blockUpdateDialog();
@@ -737,10 +737,10 @@
                 vpnLog('libcore check error: ' + e.message, '#f00');
             }
         } catch (e) {
-            console.log('[MirrorBootstrap v19] VPN panel error: ' + e.message);
+            console.log('[MirrorBootstrap v20] VPN panel error: ' + e.message);
         }
 
-        console.log('[MirrorBootstrap v19] === DEFERRED INIT DONE ===');
+        console.log('[MirrorBootstrap v20] === DEFERRED INIT DONE ===');
     }
 
     // CHẠY CRITICAL PARTS NGAY LẬP TỨC (SYNCHRONOUS)
