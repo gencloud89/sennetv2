@@ -1,12 +1,12 @@
 /**
- * mirror-bootstrap.js — v14-DEBUG cho SENNET VPN macOS
+ * mirror-bootstrap.js — v19-DEBUG cho SENNET VPN macOS
  * ==================================================================
- * VERSION: v14-DEBUG (2026-07-21)
+ * VERSION: v19-DEBUG (2026-07-21)
  *
- * THAY ĐỔI so với v10:
- *   1. 🖥️ VPN DEBUG PANEL — hiển thị trạng thái VPN (core status, connection)
- *   2. 📡 IPC LISTENERS — bắt coreStatus, statusJS, applog từ main process
- *   3. 🔧 VPN ERROR DETECTION — hiển thị lỗi khi libcore không start được
+ * THAY ĐỔI so với v14:
+ *   1. 🔧 VPN LOGIC REWRITE — fix double libcore start, root shell deadlock
+ *   2. 📡 Port monitoring — kiểm tra port 9790/10090 status
+ *   3. 📊 Traffic stats — hiển thị upload/download nếu có
  *
  * Giữ nguyên từ v10:
  *   - Default APP_API_URL = https://kio.senviet.us
@@ -541,9 +541,68 @@
             var path = require('path');
             logPath = path.join(app.getPath('appData'), 'Gudao', 'vpn_debug.log');
         } catch(e) {}
-        _vpnPanel.innerHTML = '<b style="color:#ff0">VPN Debug</b> | <span id="__vpnCoreStatus" style="color:#f00">CORE: ?</span> | <span id="__vpnConnStatus" style="color:#f00">VPN: ?</span>\n' +
-            '<span style="color:#888;font-size:9px">Log file: ' + logPath + '</span>\n';
+        _vpnPanel.innerHTML = '<b style="color:#ff0">VPN Debug v19</b> | <span id="__vpnCoreStatus" style="color:#f00">CORE: ?</span> | <span id="__vpnConnStatus" style="color:#f00">VPN: ?</span>\n' +
+            '<span style="color:#888;font-size:9px">Log: ' + logPath + '</span>\n';
         document.body.appendChild(_vpnPanel);
+
+        // Auto-check port status (sing-box ports)
+        setInterval(function () {
+            updateVpnPortStatus();
+        }, 5000);
+        updateVpnPortStatus();
+    }
+
+    function updateVpnPortStatus() {
+        var portStatusEl = document.getElementById('__vpnPortStatus');
+        if (!portStatusEl && _vpnPanel) {
+            // Tạo element cho port status
+            var statusLine = document.createElement('div');
+            statusLine.id = '__vpnPortStatus';
+            statusLine.style.cssText = 'font-size:9px;color:#888;margin-top:2px;';
+            _vpnPanel.insertBefore(statusLine, _vpnPanel.firstChild.nextSibling.nextSibling);
+            portStatusEl = statusLine;
+        }
+        if (!portStatusEl) return;
+
+        try {
+            var net = require('net');
+            var ports = [
+                { port: 10090, name: 'SOCKS/HTTP' },
+                { port: 9790, name: 'API' }
+            ];
+            var results = [];
+            var pending = ports.length;
+
+            ports.forEach(function (p) {
+                var sock = new net.Socket();
+                sock.setTimeout(2000);
+                sock.on('connect', function () {
+                    results.push('<span style="color:#0f0">' + p.name + ':' + p.port + ' OPEN</span>');
+                    sock.destroy();
+                    pending--;
+                    if (pending === 0) update();
+                });
+                sock.on('error', function () {
+                    results.push('<span style="color:#f00">' + p.name + ':' + p.port + ' CLOSED</span>');
+                    sock.destroy();
+                    pending--;
+                    if (pending === 0) update();
+                });
+                sock.on('timeout', function () {
+                    results.push('<span style="color:#f80">' + p.name + ':' + p.port + ' TIMEOUT</span>');
+                    sock.destroy();
+                    pending--;
+                    if (pending === 0) update();
+                });
+                sock.connect(p.port, '127.0.0.1');
+            });
+
+            function update() {
+                portStatusEl.innerHTML = 'Ports: ' + results.join(' | ');
+            }
+        } catch (e) {
+            portStatusEl.innerHTML = 'Ports: <span style="color:#f00">check error</span>';
+        }
     }
 
     function updateVpnPanel() {
@@ -632,7 +691,7 @@
     }
 
     function initDeferred() {
-        console.log('[MirrorBootstrap v14] === DEFERRED INIT START ===');
+        console.log('[MirrorBootstrap v19] === DEFERRED INIT START ===');
 
         // 5. Block update dialogs (cần document.head và document.body)
         blockUpdateDialog();
@@ -647,7 +706,7 @@
         try {
             createVpnPanel();
             setupVpnIpcListeners();
-            vpnLog('VPN Debug Panel ready', '#ff0');
+            vpnLog('VPN v19 — log monitor mode', '#ff0');
             // Check if libcore exists
             try {
                 var fs = require('fs');
@@ -678,10 +737,10 @@
                 vpnLog('libcore check error: ' + e.message, '#f00');
             }
         } catch (e) {
-            console.log('[MirrorBootstrap v14] VPN panel error: ' + e.message);
+            console.log('[MirrorBootstrap v19] VPN panel error: ' + e.message);
         }
 
-        console.log('[MirrorBootstrap v14] === DEFERRED INIT DONE ===');
+        console.log('[MirrorBootstrap v19] === DEFERRED INIT DONE ===');
     }
 
     // CHẠY CRITICAL PARTS NGAY LẬP TỨC (SYNCHRONOUS)

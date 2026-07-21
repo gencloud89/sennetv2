@@ -173,13 +173,23 @@ function setupPrivilegedSession() {
 function cleanupPrivilegedSession() {
   if (!isMac || !_vpnCmdFile) return
   vpnLogToFile('Cleaning up privileged session')
-  // Gửi lệnh exit
-  execRoot('exit 0')
-  try {
-    fs.unlinkSync(_vpnCmdFile)
-    fs.unlinkSync(_vpnCmdFile + '.exec')
-    fs.unlinkSync(_vpnCmdFile + '.tmp')
-  } catch (e) {}
+
+  // Dừng log monitor trước
+  if (_coreLogMonitor) {
+    _coreLogMonitor.stop()
+    _coreLogMonitor = null
+  }
+
+  // Gửi lệnh cleanup: kill libcore + xóa file
+  var cleanupCmd = 'pkill -9 -f libcore 2>/dev/null || true'
+  execRoot(cleanupCmd)
+  setTimeout(function () {
+    try {
+      fs.unlinkSync(_vpnCmdFile)
+      fs.unlinkSync(path.join(appConfigDir, 'vpn_core.log'))
+      fs.unlinkSync(path.join(appConfigDir, 'vpn_core.pid'))
+    } catch (e) {}
+  }, 1500)
   _vpnRootReady = false
 }
 // Mac: dùng libcore (không .exe), Windows: libcore.exe
@@ -700,109 +710,321 @@ const getResource = (_0x22f73a) => {
   _0x22f73a && (_0x53bccf = path.join(_0x53bccf, _0x22f73a))
   return _0x53bccf
 }
+// ============================================================
+// CORE LOG MONITOR — Đọc output libcore từ log file
+// ============================================================
+// Vì libcore được start bởi root shell (qua execRoot), output của nó
+// được redirect ra file. Monitor này thay thế cho cps.exec stdout/stderr.
+
+var _coreLogMonitor = null  // { stop(), pid, _timer }
+
+function setupCoreLogMonitor(logFile, pidFile) {
+  // Dọn dẹp monitor cũ nếu có
+  if (_coreLogMonitor) {
+    try { clearInterval(_coreLogMonitor._timer) } catch (e) {}
+    _coreLogMonitor = null
+  }
+
+  var monitor = {
+    pid: null,
+    _timer: null,
+    _lastSize: 0,
+    _started: false,
+    _startAttempts: 0,
+    _stopped: false
+  }
+
+  function readPid() {
+    try {
+      if (fs.existsSync(pidFile)) {
+        var pidStr = fs.readFileSync(pidFile, 'utf8').trim()
+        if (pidStr && /^\d+$/.test(pidStr)) {
+          monitor.pid = parseInt(pidStr, 10)
+        }
+      }
+    } catch (e) {}
+  }
+
+  function checkPort9790() {
+    // Kiểm tra sing-box controller API đã sẵn sàng chưa
+    try {
+      var result = cps.execSync(
+        'curl -sf --connect-timeout 1 --max-time 2 http://127.0.0.1:9790/ 2>/dev/null || echo "NOT_READY"',
+        { encoding: 'utf8', timeout: 3000 }
+      )
+      if (result && result.indexOf('NOT_READY') === -1) {
+        return true
+      }
+    } catch (e) {}
+    return false
+  }
+
+  function pollLog() {
+    if (monitor._stopped) return
+
+    // Kiểm tra PID còn sống không
+    readPid()
+    if (monitor.pid && !monitor._stopped) {
+      try {
+        process.kill(monitor.pid, 0)  // signal 0 = check exists
+      } catch (e) {
+        // Process đã chết
+        if (monitor._started) {
+          vpnLogToFile('libcore process died (pid=' + monitor.pid + ')')
+          webContentsSend('applog', 'exit:libcore process ended')
+          webContentsSend('coreStatus', 'false')
+          monitor._started = false
+        }
+        monitor.pid = null
+      }
+    }
+
+    // Đọc nội dung mới từ log file
+    try {
+      if (!fs.existsSync(logFile)) return
+      var stat = fs.statSync(logFile)
+      if (stat.size > monitor._lastSize) {
+        var fd = fs.openSync(logFile, 'r')
+        var buf = Buffer.alloc(Math.min(stat.size - monitor._lastSize, 65536))
+        fs.readSync(fd, buf, 0, buf.length, monitor._lastSize)
+        fs.closeSync(fd)
+        monitor._lastSize = stat.size
+
+        var text = buf.toString('utf8')
+        var lines = text.split('\n')
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i].trim()
+          if (!line) continue
+
+          // Forward to renderer
+          webContentsSend('applog', 'data:' + line.substring(0, 300))
+
+          // Phát hiện sing-box khởi động thành công
+          if (line.indexOf('sing-box started') > -1 && !monitor._started) {
+            monitor._started = true
+            monitor._startAttempts = 0
+            readPid()
+            vpnLogToFile('libcore STARTED (pid=' + monitor.pid + ')')
+            webContentsSend('coreStatus', 'true')
+            console.log('start success:' + monitor.pid)
+          }
+
+          // Phát hiện lỗi
+          if (line.indexOf('external controller listen failed') > -1) {
+            vpnLogToFile('libcore ERROR: port conflict (9790 already in use?)')
+            console.log('start err: port conflict')
+          }
+          if (line.indexOf('open cache file: timeout') > -1) {
+            vpnLogToFile('libcore ERROR: cache file timeout')
+            console.log('start err: cache timeout')
+          }
+        }
+      }
+    } catch (e) {}
+
+    // Fallback: nếu chưa detect "sing-box started" trong log, poll port 9790
+    if (!monitor._started && !monitor._stopped) {
+      monitor._startAttempts++
+      if (monitor._startAttempts >= 4) {  // Sau ~4s (poll mỗi 1s)
+        if (checkPort9790()) {
+          monitor._started = true
+          readPid()
+          vpnLogToFile('libcore detected via port 9790 (pid=' + monitor.pid + ')')
+          webContentsSend('coreStatus', 'true')
+          console.log('start success (port):' + monitor.pid)
+        }
+        monitor._startAttempts = 0  // Reset, sẽ kiểm tra lại sau 4s
+      }
+      if (monitor._startAttempts > 30) {
+        // Sau 30s — coi như failed
+        vpnLogToFile('libcore FAILED to start after 30s')
+        webContentsSend('coreStatus', 'false')
+        monitor._startAttempts = 0
+      }
+    }
+  }
+
+  // Xóa log cũ nếu có
+  try { fs.writeFileSync(logFile, '', 'utf8'); monitor._lastSize = 0 } catch (e) {}
+
+  // Poll mỗi 1 giây
+  monitor._timer = setInterval(pollLog, 1000)
+
+  // Đọc PID sau 2s (đợi root shell ghi file)
+  setTimeout(readPid, 2000)
+
+  // Monitor methods
+  monitor.stop = function () {
+    monitor._stopped = true
+    if (monitor._timer) {
+      clearInterval(monitor._timer)
+      monitor._timer = null
+    }
+  }
+
+  monitor.kill = function () {
+    // Gửi tín hiệu kill đến PID đã biết
+    if (monitor.pid) {
+      try { process.kill(monitor.pid, 'SIGTERM') } catch (e) {}
+    }
+  }
+
+  _coreLogMonitor = monitor
+  vpnLogToFile('Core log monitor started: ' + logFile)
+  return monitor
+}
+
 async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
   let _0x2f9277 = path.join(appConfigDir, libcoreName)
   const _0x3c818b = '"' + _0x2f9277 + '" run -D "' + appConfigDir + '"'
   vpnLogToFile('startClashProcess: ' + _0x3c818b)
   logger.info('run: ' + _0x3c818b)
-  // Mac: GỘP start libcore + set proxy sau 3s trong 1 sudo call
+
   if (isMac) {
-    var services = getActiveNetworkServices()
-    var combined = _0x3c818b + ' & PID=$!; sleep 3; '
-    for (var i = 0; i < services.length; i++) {
-      var svc = services[i]
-      combined += 'networksetup -setwebproxy "' + svc + '" 127.0.0.1 10090 && '
-      combined += 'networksetup -setsecurewebproxy "' + svc + '" 127.0.0.1 10090 && '
-      combined += 'networksetup -setsocksfirewallproxy "' + svc + '" 127.0.0.1 10090 && '
-    }
-    combined += 'echo PROXY_OK; wait $PID'
-    vpnLogToFile('VPN ON combined (' + services.length + ' services)')
-    logger.info('VPN ON combined: ' + combined)
-    execRoot(combined, function (err, stdout, stderr) {
+    // ============================================================
+    // MAC VPN START — v19 REWRITE
+    // ============================================================
+    // Fix 4 lỗi nghiêm trọng:
+    //   1. KHÔNG double start (chỉ start qua root shell, không cps.exec)
+    //   2. KHÔNG deadlock (không wait $PID — libcore chạy background)
+    //   3. CÓ log monitoring (đọc output libcore từ file log)
+    //   4. Port polling thay vì blind sleep 3s
+    // ============================================================
+    var coreLogFile = path.join(appConfigDir, 'vpn_core.log')
+    var corePidFile = path.join(appConfigDir, 'vpn_core.pid')
+
+    // Script start libcore trong root shell:
+    // - Chạy background (&), redirect output ra log file
+    // - Ghi PID ra file
+    // - KHÔNG wait — script exit ngay, root shell tiếp tục poll
+    var startScript =
+      _0x3c818b + ' > "' + coreLogFile + '" 2>&1 &\n' +
+      'echo $! > "' + corePidFile + '"\n' +
+      '# libcore started in background, root shell continues polling\n'
+
+    vpnLogToFile('VPN START (Mac v19): ' + _0x3c818b)
+    logger.info('VPN START (Mac v19): ' + startScript)
+
+    execRoot(startScript, function (err, stdout, stderr) {
       if (err || stderr) {
-        var errMsg = 'VPN ON ERROR: ' + (err ? err.message || err : stderr)
+        var errMsg = 'VPN START ERROR: ' + (err ? err.message || err : stderr)
         logger.info(errMsg); vpnLogToFile(errMsg)
-        webContentsSend('applog', 'VPN ERROR: ' + (err ? err.message || err : stderr))
+        webContentsSend('applog', 'VPN START ERROR: ' + (err ? err.message || err : stderr))
       } else {
-        var okMsg = 'VPN ON OK (' + services.length + ' services): ' + (stdout || '').trim().substring(0, 100)
-        logger.info(okMsg); vpnLogToFile(okMsg)
+        vpnLogToFile('VPN START script executed OK')
       }
     })
-  }
-  // Vẫn chạy non-sudo instance để monitor stdout/stderr
-  coreServer = cps.exec(_0x3c818b)
-  vpnLogToFile('coreServer pid: ' + (coreServer ? coreServer.pid : 'null'))
-  coreServer.stdout.on('data', (_0x4ebb8f) => {
-    webContentsSend('applog', 'data:' + _0x4ebb8f)
-    if (_0x4ebb8f.indexOf('sing-box started') > -1) {
-      console.log('start success:' + coreServer.pid)
-      webContentsSend('coreStatus', 'true')
-    } else {
-      _0x4ebb8f.indexOf('external controller listen failed error') > -1 &&
-        console.log('start err.')
-    }
-  })
-  coreServer.on('SIGINT', function () {
-    console.log('core ignore SIGINT')
-  })
-  coreServer.stderr.on('data', (_0x49166a) => {
-    webContentsSend('applog', 'data2:' + _0x49166a)
-    if (_0x49166a.indexOf('sing-box started') > -1) {
-      console.log('start success:' + coreServer.pid)
-      webContentsSend('coreStatus', 'true')
-    } else {
-      if (_0x49166a.indexOf('external controller listen failed error') > -1) {
-        console.log('start err.')
+
+    // KHỞI ĐỘNG LOG MONITOR — thay thế cho cps.exec stdout/stderr
+    _coreLogMonitor = setupCoreLogMonitor(coreLogFile, corePidFile)
+
+    // Set coreServer = monitor object (giữ tương thích với code cũ)
+    // Code check coreServer != null, coreServer.pid, coreServer.kill()
+    coreServer = _coreLogMonitor
+  } else {
+    // Windows: giữ nguyên logic cps.exec
+    coreServer = cps.exec(_0x3c818b)
+    vpnLogToFile('coreServer pid: ' + (coreServer ? coreServer.pid : 'null'))
+    coreServer.stdout.on('data', (_0x4ebb8f) => {
+      webContentsSend('applog', 'data:' + _0x4ebb8f)
+      if (_0x4ebb8f.indexOf('sing-box started') > -1) {
+        console.log('start success:' + coreServer.pid)
+        webContentsSend('coreStatus', 'true')
       } else {
-        _0x49166a.indexOf('open cache file: timeout') > -1 &&
+        _0x4ebb8f.indexOf('external controller listen failed error') > -1 &&
           console.log('start err.')
       }
-    }
-  })
-  coreServer.on('close', (_0xb5b6e4) => {
-    webContentsSend('applog', 'close:' + _0xb5b6e4)
-    console.log('RUN Close' + _0xb5b6e4)
-  })
-  coreServer.on('exit', (_0x1f23ec) => {
-    webContentsSend('applog', 'exit:' + _0x1f23ec)
-    coreServer = null
-    console.log('RUN Exit' + _0x1f23ec)
-  })
+    })
+    coreServer.on('SIGINT', function () {
+      console.log('core ignore SIGINT')
+    })
+    coreServer.stderr.on('data', (_0x49166a) => {
+      webContentsSend('applog', 'data2:' + _0x49166a)
+      if (_0x49166a.indexOf('sing-box started') > -1) {
+        console.log('start success:' + coreServer.pid)
+        webContentsSend('coreStatus', 'true')
+      } else {
+        if (_0x49166a.indexOf('external controller listen failed error') > -1) {
+          console.log('start err.')
+        } else {
+          _0x49166a.indexOf('open cache file: timeout') > -1 &&
+            console.log('start err.')
+        }
+      }
+    })
+    coreServer.on('close', (_0xb5b6e4) => {
+      webContentsSend('applog', 'close:' + _0xb5b6e4)
+      console.log('RUN Close' + _0xb5b6e4)
+    })
+    coreServer.on('exit', (_0x1f23ec) => {
+      webContentsSend('applog', 'exit:' + _0x1f23ec)
+      coreServer = null
+      console.log('RUN Exit' + _0x1f23ec)
+    })
+  }
 }
 function NotTunkillCoreProcess() {
   return new Promise((_0xb3107a) => {
     if (isMac) {
-      // Mac: GỘP kill + tắt proxy trong 1 lần sudo → GIẢM password prompt
+      // ============================================================
+      // MAC VPN STOP — v19 REWRITE
+      // ============================================================
+      // 1. Stop log monitor trước (không cần poll nữa)
+      // 2. execRoot: pkill libcore + unset proxy (script KHÔNG wait)
+      // 3. Clean up coreServer reference
+      // ============================================================
+
+      // Dừng log monitor
+      if (_coreLogMonitor) {
+        _coreLogMonitor.stop()
+        _coreLogMonitor = null
+      }
+
       var services = getActiveNetworkServices()
-      var combined = 'pkill -f libcore 2>/dev/null || true'
+      // Script stop: kill libcore + tắt proxy
+      // Dùng pkill -9 để đảm bảo kill (kèm fallback nếu không có process)
+      var combined = 'pkill -9 -f libcore 2>/dev/null || true'
       for (var i = 0; i < services.length; i++) {
         var svc = services[i]
-        combined += '; networksetup -setwebproxystate "' + svc + '" off'
-        combined += '; networksetup -setsecurewebproxystate "' + svc + '" off'
-        combined += '; networksetup -setsocksfirewallproxystate "' + svc + '" off'
+        combined += '\nnetworksetup -setwebproxystate "' + svc + '" off'
+        combined += '\nnetworksetup -setsecurewebproxystate "' + svc + '" off'
+        combined += '\nnetworksetup -setsocksfirewallproxystate "' + svc + '" off'
       }
-      vpnLogToFile('VPN OFF combined (' + services.length + ' services)')
-      logger.info('VPN OFF combined: ' + combined)
+      // Dọn file PID
+      combined += '\nrm -f "' + path.join(appConfigDir, 'vpn_core.pid') + '"'
+
+      vpnLogToFile('VPN STOP (' + services.length + ' services)')
+      logger.info('VPN STOP: ' + combined.substring(0, 200))
+
       execRoot(combined, function (err, stdout, stderr) {
         if (err || stderr) {
-          var errMsg = 'VPN OFF ERROR: ' + (err ? err.message || err : stderr)
+          var errMsg = 'VPN STOP ERROR: ' + (err ? err.message || err : stderr)
           logger.info(errMsg); vpnLogToFile(errMsg)
         } else {
-          vpnLogToFile('VPN OFF OK'); logger.info('VPN OFF OK')
+          vpnLogToFile('VPN STOP OK'); logger.info('VPN STOP OK')
         }
-        coreServer != null &&
-          (console.log('Kill Core:' + coreServer.pid), coreServer.kill())
-        setTimeout(() => _0xb3107a(), 1000)
+
+        // Clean up coreServer (Mac: là monitor object, không phải ChildProcess)
+        if (coreServer != null) {
+          if (coreServer.stop) coreServer.stop()  // Mac monitor
+          console.log('Kill Core:' + (coreServer.pid || 'monitor'))
+        }
+        coreServer = null
+
+        // Gửi status STOP đến renderer
+        webContentsSend('coreStatus', 'false')
+
+        setTimeout(function () { _0xb3107a() }, 1000)
       })
     } else {
       // Windows: dùng taskkill
       let _0x5d4efd = 'cmd /k taskkill /f /im libcore.exe'
       cps.exec(_0x5d4efd)
+      setProxy()
+      coreServer != null &&
+        (console.log('Kill Core:' + coreServer.pid), coreServer.kill())
+      setTimeout(function () { _0xb3107a() }, 1500)
     }
-    setProxy()
-    coreServer != null &&
-      (console.log('Kill Core:' + coreServer.pid), coreServer.kill())
-    setTimeout(() => _0xb3107a(), 1500)
   }).catch((_0x421f41) => {
     return _0x421f41
   })
