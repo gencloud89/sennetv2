@@ -90,6 +90,91 @@ function vpnLogToFile(msg) {
     fs.appendFileSync(vpnLogPath, line, 'utf8')
   } catch (e) {}
 }
+
+// ============================================================
+// PRIVILEGED SESSION — 1 sudo prompt cho TOÀN BỘ phiên app
+// ============================================================
+// Dùng FIFO pipe: root shell chạy ngầm, nhận lệnh qua pipe.
+// Chỉ prompt password MỘT LẦN khi mở app.
+
+var _vpnFifo = isMac ? path.join(appConfigDir, 'vpn_cmd_fifo') : null
+var _vpnRootReady = false
+var _vpnPendingCallbacks = []
+
+function execRoot(cmd, callback) {
+  if (!isMac) {
+    // Windows fallback
+    cps.exec(cmd, callback)
+    return
+  }
+  if (_vpnRootReady) {
+    try {
+      // Escape single quotes: replace ' with '\''
+      var safeCmd = cmd.replace(/'/g, "'\\''")
+      fs.appendFileSync(_vpnFifo, "echo '===CMD_START==='; " + safeCmd + "; echo '===CMD_END===' \n")
+      vpnLogToFile('execRoot: ' + cmd.substring(0, 150))
+    } catch (e) {
+      vpnLogToFile('execRoot FIFO write error: ' + e.message)
+    }
+    // Callback fires immediately (fire-and-forget)
+    if (callback) setTimeout(callback, 500)
+  } else {
+    // FIFO chưa sẵn sàng — queue lại
+    vpnLogToFile('execRoot QUEUED (root not ready): ' + cmd.substring(0, 100))
+    _vpnPendingCallbacks.push({ cmd: cmd, cb: callback })
+  }
+}
+
+function setupPrivilegedSession() {
+  if (!isMac) return
+  vpnLogToFile('=== Setting up privileged session (1 password) ===')
+
+  // Tạo FIFO
+  try {
+    cps.execSync('rm -f "' + _vpnFifo + '" && mkfifo "' + _vpnFifo + '"', { encoding: 'utf8' })
+    vpnLogToFile('FIFO created: ' + _vpnFifo)
+  } catch (e) {
+    vpnLogToFile('FIFO create error: ' + e.message)
+    return
+  }
+
+  // Root shell loop đọc lệnh từ FIFO — 1 sudo prompt duy nhất
+  var loopScript = 'while true; do /bin/sh "' + _vpnFifo + '" 2>&1; done'
+  logger.info('Starting privileged session...')
+  vpnLogToFile('Starting root shell: ' + loopScript)
+
+  sudo.exec(loopScript, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+    if (err) {
+      vpnLogToFile('Root shell exited: ' + (err.message || err))
+      _vpnRootReady = false
+    }
+  })
+
+  // Đánh dấu ready sau 1 giây (đủ để sudo prompt hiện và user nhập pass)
+  setTimeout(function () {
+    _vpnRootReady = true
+    vpnLogToFile('Root shell READY — executing queued commands')
+    // Xử lý các lệnh đang chờ
+    for (var i = 0; i < _vpnPendingCallbacks.length; i++) {
+      var pending = _vpnPendingCallbacks[i]
+      execRoot(pending.cmd, pending.cb)
+    }
+    _vpnPendingCallbacks = []
+  }, 2000)
+}
+
+function cleanupPrivilegedSession() {
+  if (!isMac || !_vpnFifo) return
+  vpnLogToFile('Cleaning up privileged session')
+  try {
+    // Gửi lệnh exit để root shell thoát
+    fs.appendFileSync(_vpnFifo, 'exit 0\n')
+  } catch (e) {}
+  try {
+    cps.execSync('rm -f "' + _vpnFifo + '"')
+  } catch (e) {}
+  _vpnRootReady = false
+}
 // Mac: dùng libcore (không .exe), Windows: libcore.exe
 var libcoreName = isMac ? 'libcore' : 'libcore.exe'
 var libcorePath = path.join(appConfigDir, libcoreName)
@@ -151,6 +236,10 @@ function init() {
   ]
   logger.info('app init 2.')
   initProxyHelper()
+    .then(function () {
+      // Setup privileged session: 1 sudo prompt duy nhất cho toàn bộ phiên
+      if (isMac) setupPrivilegedSession()
+    })
     .then(function () {
       initConfig()
         .then(function () {
@@ -360,6 +449,7 @@ app.on('before-quit', () => {
 app.on('quit', function () {
   console.log('quit ' + noHelper)
   noHelper == null && closeServer()
+  if (isMac) cleanupPrivilegedSession()
 })
 app.on('activate', () => {
   getWindow() === null ? createWindow() : reopenWindow()
@@ -472,7 +562,7 @@ function setProxy(_0x8f8ad7) {
       console.log('proxy: Mac proxy ON (' + networkServices.length + ' services, primary: ' + primaryService + ')')
       logger.info('proxy: Mac proxy ON: ' + proxyOnCmd)
       vpnLogToFile('PROXY ON (' + networkServices.length + ' services): ' + primaryService)
-      sudo.exec(proxyOnCmd, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+      execRoot(proxyOnCmd, function (err, stdout, stderr) {
         if (err || stderr) {
           var errMsg = 'PROXY ON ERROR: ' + (err ? err.message || err : stderr)
           logger.info(errMsg); vpnLogToFile(errMsg)
@@ -495,7 +585,7 @@ function setProxy(_0x8f8ad7) {
       console.log('proxy: Mac proxy OFF (' + networkServices.length + ' services)')
       logger.info('proxy: Mac proxy OFF: ' + proxyOffCmd)
       vpnLogToFile('PROXY OFF (' + networkServices.length + ' services)')
-      sudo.exec(proxyOffCmd, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+      execRoot(proxyOffCmd, function (err, stdout, stderr) {
         if (err || stderr) {
           var errMsg = 'PROXY OFF ERROR: ' + (err ? err.message || err : stderr)
           logger.info(errMsg); vpnLogToFile(errMsg)
@@ -621,7 +711,7 @@ async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
     combined += 'echo PROXY_OK; wait $PID'
     vpnLogToFile('VPN ON combined (' + services.length + ' services)')
     logger.info('VPN ON combined: ' + combined)
-    sudo.exec(combined, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+    execRoot(combined, function (err, stdout, stderr) {
       if (err || stderr) {
         var errMsg = 'VPN ON ERROR: ' + (err ? err.message || err : stderr)
         logger.info(errMsg); vpnLogToFile(errMsg)
@@ -686,7 +776,7 @@ function NotTunkillCoreProcess() {
       }
       vpnLogToFile('VPN OFF combined (' + services.length + ' services)')
       logger.info('VPN OFF combined: ' + combined)
-      sudo.exec(combined, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+      execRoot(combined, function (err, stdout, stderr) {
         if (err || stderr) {
           var errMsg = 'VPN OFF ERROR: ' + (err ? err.message || err : stderr)
           logger.info(errMsg); vpnLogToFile(errMsg)
