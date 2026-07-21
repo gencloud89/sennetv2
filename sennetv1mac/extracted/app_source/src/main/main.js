@@ -412,27 +412,43 @@ const logger = tracer.console({
         .write(_0x94d5c.output + '\n', 'utf8')
   },
 })
-// Lấy danh sách ACTIVE network services (theo thứ tự ưu tiên)
+// Lấy danh sách NETWORK SERVICES CÓ PHẦN CỨNG THẬT (không phải ảo/VPN)
 function getActiveNetworkServices() {
   var services = []
   try {
-    // Dùng listnetworkserviceorder — hiển thị services theo thứ tự ưu tiên
-    var output = cps.execSync('networksetup -listnetworkserviceorder', { encoding: 'utf8' })
-    var lines = output.split('\n')
+    // Lấy hardware ports — chỉ services có hardware port MỚI LÀ THẬT
+    var hwOut = cps.execSync('networksetup -listallhardwareports', { encoding: 'utf8' })
+    var realServices = {}
+    var lines = hwOut.split('\n')
+    var currentSvc = null
     for (var i = 0; i < lines.length; i++) {
-      var match = lines[i].match(/^\(\d+\)\s+(.+)$/)
+      var line = lines[i].trim()
+      if (line.indexOf('Hardware Port:') === 0) {
+        currentSvc = line.substring('Hardware Port:'.length).trim()
+      } else if (line.indexOf('Device:') === 0 && currentSvc) {
+        realServices[currentSvc] = line.substring('Device:'.length).trim()
+      }
+    }
+    logger.info('proxy: real hardware services: ' + JSON.stringify(Object.keys(realServices)))
+
+    // Lấy services theo thứ tự ưu tiên, CHỈ giữ services có hardware thật
+    var orderOut = cps.execSync('networksetup -listnetworkserviceorder', { encoding: 'utf8' })
+    var orderLines = orderOut.split('\n')
+    for (var j = 0; j < orderLines.length; j++) {
+      var match = orderLines[j].match(/^\(\d+\)\s+(.+)$/)
       if (match) {
         var svc = match[1].trim()
-        // Lọc bỏ services không phải network thực (Bluetooth, FireWire, etc.)
-        if (svc && svc.indexOf('*') === -1 && svc !== 'Bluetooth' && svc.indexOf('Bluetooth') === -1 &&
-            svc.indexOf('FireWire') === -1 && svc.indexOf('Thunderbolt Bridge') === -1) {
+        // CHỈ lấy services có hardware port THẬT (bỏ qua VPN ảo, iPhone tethering...)
+        if (realServices[svc] && svc.indexOf('*') === -1) {
           services.push(svc)
         }
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    logger.info('proxy: error detecting services: ' + e.message)
+  }
   if (services.length === 0) services.push('Wi-Fi')
-  logger.info('proxy: active services: ' + JSON.stringify(services))
+  logger.info('proxy: filtered active services: ' + JSON.stringify(services))
   return services
 }
 
@@ -782,52 +798,34 @@ function initPowerMonitor() {
 function initProxyHelper() {
   return new Promise(function (_0x5647bb, _0x560c8f) {
     if (isMac) {
-      logger.info('help init (Mac).')
-      vpnLogToFile('=== SENNET VPN init (Mac) ===')
-      vpnLogToFile('tun2socksPath: ' + tun2socksPath)
-      vpnLogToFile('tun2socksToolPath: ' + tun2socksToolPath)
-      // Kiểm tra libcore tồn tại không — nếu không, vẫn cho app chạy (chỉ VPN không hoạt động)
+      // Mac: KHÔNG cần sudo ở bước init nữa
+      // - libcore được copy bởi initConfig() (dùng fs.copyFile, không cần sudo)
+      // - libcore được start với sudo trong startClashProcess()
+      // - Việc chown/chmod/setuid không cần thiết vì đã dùng sudo để chạy
+      logger.info('help init (Mac) — no sudo needed.')
+      vpnLogToFile('=== SENNET VPN init (Mac) v17 ===')
+      vpnLogToFile('tun2socksPath (Resources): ' + tun2socksPath)
+      vpnLogToFile('libcorePath (appData): ' + path.join(appConfigDir, libcoreName))
       if (!fs.existsSync(tun2socksPath)) {
-        var msg = 'libcore not found at ' + tun2socksPath + ' — VPN core unavailable, app will run without VPN'
-        logger.info(msg)
-        vpnLogToFile('ERROR: ' + msg)
-        return _0x5647bb()
-      }
-      vpnLogToFile('libcore FOUND at: ' + tun2socksPath)
-      fs.readFile(
-        tun2socksToolPath,
-        { encoding: 'utf-8' },
-        function (_0xa2fd0b, _0x4a0d1f) {
-          if (_0xa2fd0b) {
-            // libcore chưa có trong appConfigDir — copy từ Resources
-            var _0xe6dae4 =
-              ' cp ' +
-              tun2socksPath +
-              ' "' +
-              tun2socksToolPath +
-              '" && chown root:wheel "' +
-              tun2socksToolPath +
-              '" && chmod a+rx "' +
-              tun2socksToolPath +
-              '" && chmod +s "' +
-              tun2socksToolPath +
-              '"'
-            sudo.exec(
-              _0xe6dae4,
-              { name: 'APP' },
-              (_0x566aa0, _0x59c963, _0x3fe7d7) => {
-                return _0x566aa0 || _0x3fe7d7
-                  ? (logger.info('help init err 授權失敗 (sudo failed, VPN may not work): ' + (_0x566aa0 || _0x3fe7d7)),
-                    // VẪN resolve — cho app chạy tiếp, chỉ VPN không hoạt động
-                    _0x5647bb())
-                  : (logger.info('help init success.'), _0x5647bb())
-              }
-            )
+        var msg = 'libcore not found at ' + tun2socksPath + ' — VPN core unavailable'
+        logger.info(msg); vpnLogToFile('ERROR: ' + msg)
+      } else {
+        vpnLogToFile('libcore FOUND in Resources')
+        // Copy libcore từ Resources vào appConfigDir (không cần sudo)
+        try {
+          var destLibcore = path.join(appConfigDir, libcoreName)
+          if (!fs.existsSync(destLibcore)) {
+            fs.copyFileSync(tun2socksPath, destLibcore)
+            fs.chmodSync(destLibcore, '755')
+            vpnLogToFile('libcore copied to: ' + destLibcore)
           } else {
-            return logger.info('help done.'), _0x5647bb()
+            vpnLogToFile('libcore already exists at: ' + destLibcore)
           }
+        } catch (copyErr) {
+          vpnLogToFile('libcore copy warning: ' + copyErr.message)
         }
-      )
+      }
+      return _0x5647bb()
     } else {
       return _0x5647bb()
     }
