@@ -79,5 +79,59 @@
 <script src="assets/js/axios.min.js"></script>
 <script src="assets/js/encrypt.js"></script>
 <script src="assets/js/index.min.js"></script>
-<script src="assets/js/mirror-bootstrap.js"></script>
+<!-- MIRROR-BOOTSTRAP DISABLED FOR DEBUG -->
+<!-- <script src="assets/js/mirror-bootstrap.js"></script> -->
+<script>
+  // === v11-DEBUG: Minimal inline bootstrap ===
+  (function() {
+    console.log('[v11-DEBUG] inline bootstrap START');
+
+    // 1. Set default APP_API_URL if not present
+    try {
+      var apiUrl = localStorage.getItem('APP_API_URL');
+      console.log('[v11-DEBUG] localStorage APP_API_URL=' + (apiUrl || '(empty)'));
+      if (!apiUrl || apiUrl.length < 5) {
+        localStorage.setItem('APP_API_URL', 'https://kio.senviet.us');
+        console.log('[v11-DEBUG] SET default APP_API_URL=https://kio.senviet.us');
+      }
+    } catch(e) {
+      console.log('[v11-DEBUG] localStorage ERROR:', e.message);
+    }
+
+    // 2. Log ALL fetch calls (pass-through, NO modification)
+    var _orig = window.fetch;
+    window.fetch = function(input, init) {
+      var url = '';
+      try {
+        url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+      } catch(e) {}
+
+      var shortUrl = url.length > 150 ? url.substring(0, 150) + '...' : url;
+      console.log('[v11-DEBUG] fetch >> ' + shortUrl);
+
+      var startTime = Date.now();
+      return _orig.call(this, input, init).then(function(resp) {
+        var ms = Date.now() - startTime;
+        console.log('[v11-DEBUG] fetch << ' + resp.status + ' (' + ms + 'ms) ' + shortUrl);
+        return resp;
+      }, function(err) {
+        var ms = Date.now() - startTime;
+        console.log('[v11-DEBUG] fetch !! ERROR (' + ms + 'ms): ' + (err.message || err) + ' | ' + shortUrl);
+        return Promise.reject(err);
+      });
+    };
+
+    // 3. Catch unhandled rejections
+    window.addEventListener('unhandledrejection', function(e) {
+      console.log('[v11-DEBUG] UNHANDLED REJECTION:', e.reason ? (e.reason.message || e.reason) : 'unknown');
+    });
+
+    // 4. Global error
+    window.addEventListener('error', function(e) {
+      console.log('[v11-DEBUG] GLOBAL ERROR:', e.message, e.filename, 'line', e.lineno);
+    });
+
+    console.log('[v11-DEBUG] inline bootstrap DONE');
+  })();
+</script>
 <script src="assets/js/app.js?202305"></script>
