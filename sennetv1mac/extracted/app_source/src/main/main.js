@@ -72,6 +72,7 @@ var __static = path.join(__libname, 'extra', 'static')
 const _appname = 'Gudao',
   appConfigDir = path.join(app.getPath('appData'), _appname),
   logPath = path.join(appConfigDir, 'app_client.log'),
+  vpnLogPath = path.join(appConfigDir, 'vpn_debug.log'),  // VPN debug log riêng
   confPath = path.join(os.homedir(), '.config'),
   dirPath = path.join(confPath, _appname),
   geoipPath = path.join(appConfigDir, 'geoip.db'),
@@ -80,6 +81,15 @@ const _appname = 'Gudao',
   configPath2 = path.join(__libname, 'extra/config.json'),
   sysproxyPath = path.join(appConfigDir, 'sysproxy.exe'),
   userConfigDir = app.getPath('userData')
+
+// Helper: ghi log VPN ra file riêng
+function vpnLogToFile(msg) {
+  try {
+    var ts = new Date().toISOString()
+    var line = '[' + ts + '] ' + msg + '\n'
+    fs.appendFileSync(vpnLogPath, line, 'utf8')
+  } catch (e) {}
+}
 // Mac: dùng libcore (không .exe), Windows: libcore.exe
 var libcoreName = isMac ? 'libcore' : 'libcore.exe'
 var libcorePath = path.join(appConfigDir, libcoreName)
@@ -417,25 +427,55 @@ function setProxy(_0x8f8ad7) {
           break
         }
       }
-      if (lines.length > 1) networkService = lines[1].trim() // Fallback: service thứ 2 (bỏ qua dòng header)
+      if (lines.length > 1 && networkService === 'Wi-Fi') networkService = lines[1].trim()
+      logger.info('proxy: detected network service: ' + networkService)
     } catch (e) {
       networkService = 'Wi-Fi'
+      logger.info('proxy: failed to detect network service, using Wi-Fi: ' + e.message)
     }
 
     if (_0x8f8ad7) {
-      // Bật proxy HTTP + HTTPS + SOCKS
-      cps.execSync('networksetup -setwebproxy "' + networkService + '" 127.0.0.1 10090', { encoding: 'utf8' })
-      cps.execSync('networksetup -setsecurewebproxy "' + networkService + '" 127.0.0.1 10090', { encoding: 'utf8' })
-      cps.execSync('networksetup -setsocksfirewallproxy "' + networkService + '" 127.0.0.1 10090', { encoding: 'utf8' })
+      // Bật proxy HTTP + HTTPS + SOCKS — dùng sudo vì networksetup cần quyền admin trên macOS
+      var proxyOnCmd = 'networksetup -setwebproxy "' + networkService + '" 127.0.0.1 10090 && ' +
+        'networksetup -setsecurewebproxy "' + networkService + '" 127.0.0.1 10090 && ' +
+        'networksetup -setsocksfirewallproxy "' + networkService + '" 127.0.0.1 10090'
       console.log('proxy: Mac proxy ON via ' + networkService)
-      logger.info('proxy: Mac proxy ON via ' + networkService)
+      logger.info('proxy: Mac proxy ON cmd: ' + proxyOnCmd)
+      vpnLogToFile('PROXY ON cmd: ' + proxyOnCmd)
+      vpnLogToFile('PROXY ON networkService: ' + networkService)
+      // DÙNG SUDO — networksetup cần admin trên macOS
+      sudo.exec(proxyOnCmd, { name: 'SENNET VPN Proxy' }, function (err, stdout, stderr) {
+        if (err || stderr) {
+          var errMsg = 'PROXY ON ERROR: ' + (err ? err.message || err : stderr)
+          logger.info(errMsg)
+          vpnLogToFile(errMsg)
+          webContentsSend('applog', 'PROXY ERROR: ' + (err ? err.message || err : stderr))
+        } else {
+          var okMsg = 'PROXY ON OK: ' + (stdout || 'no output').trim()
+          logger.info(okMsg)
+          vpnLogToFile(okMsg)
+        }
+      })
     } else {
-      // Tắt proxy
-      cps.execSync('networksetup -setwebproxystate "' + networkService + '" off', { encoding: 'utf8' })
-      cps.execSync('networksetup -setsecurewebproxystate "' + networkService + '" off', { encoding: 'utf8' })
-      cps.execSync('networksetup -setsocksfirewallproxystate "' + networkService + '" off', { encoding: 'utf8' })
+      // Tắt proxy — dùng sudo
+      var proxyOffCmd = 'networksetup -setwebproxystate "' + networkService + '" off && ' +
+        'networksetup -setsecurewebproxystate "' + networkService + '" off && ' +
+        'networksetup -setsocksfirewallproxystate "' + networkService + '" off'
       console.log('proxy: Mac proxy OFF via ' + networkService)
-      logger.info('proxy: Mac proxy OFF via ' + networkService)
+      logger.info('proxy: Mac proxy OFF cmd: ' + proxyOffCmd)
+      vpnLogToFile('PROXY OFF cmd: ' + proxyOffCmd)
+      // DÙNG SUDO — networksetup cần admin trên macOS
+      sudo.exec(proxyOffCmd, { name: 'SENNET VPN Proxy' }, function (err, stdout, stderr) {
+        if (err || stderr) {
+          var errMsg = 'PROXY OFF ERROR: ' + (err ? err.message || err : stderr)
+          logger.info(errMsg)
+          vpnLogToFile(errMsg)
+        } else {
+          var okMsg = 'PROXY OFF OK: ' + (stdout || 'no output').trim()
+          logger.info(okMsg)
+          vpnLogToFile(okMsg)
+        }
+      })
     }
   } else {
     // Windows: dùng sysproxy.exe
@@ -539,9 +579,11 @@ const getResource = (_0x22f73a) => {
 async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
   let _0x2f9277 = path.join(appConfigDir, libcoreName)
   const _0x3c818b = '"' + _0x2f9277 + '" run -D "' + appConfigDir + '"'
+  vpnLogToFile('startClashProcess: ' + _0x3c818b)
+  logger.info('run: ' + _0x3c818b)
   sudo.exec(_0x3c818b, { name: 'My App' })
   coreServer = cps.exec(_0x3c818b)
-  logger.info('run: ' + _0x3c818b)
+  vpnLogToFile('coreServer pid: ' + (coreServer ? coreServer.pid : 'null'))
   coreServer.stdout.on('data', (_0x4ebb8f) => {
     webContentsSend('applog', 'data:' + _0x4ebb8f)
     if (_0x4ebb8f.indexOf('sing-box started') > -1) {
@@ -690,11 +732,17 @@ function initProxyHelper() {
   return new Promise(function (_0x5647bb, _0x560c8f) {
     if (isMac) {
       logger.info('help init (Mac).')
+      vpnLogToFile('=== SENNET VPN init (Mac) ===')
+      vpnLogToFile('tun2socksPath: ' + tun2socksPath)
+      vpnLogToFile('tun2socksToolPath: ' + tun2socksToolPath)
       // Kiểm tra libcore tồn tại không — nếu không, vẫn cho app chạy (chỉ VPN không hoạt động)
       if (!fs.existsSync(tun2socksPath)) {
-        logger.info('libcore not found at ' + tun2socksPath + ' — VPN core unavailable, app will run without VPN')
+        var msg = 'libcore not found at ' + tun2socksPath + ' — VPN core unavailable, app will run without VPN'
+        logger.info(msg)
+        vpnLogToFile('ERROR: ' + msg)
         return _0x5647bb()
       }
+      vpnLogToFile('libcore FOUND at: ' + tun2socksPath)
       fs.readFile(
         tun2socksToolPath,
         { encoding: 'utf-8' },

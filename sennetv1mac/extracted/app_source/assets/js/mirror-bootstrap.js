@@ -530,11 +530,19 @@
         _vpnPanel.id = '__vpnDebugPanel';
         _vpnPanel.style.cssText = 'position:fixed;bottom:0;right:0;z-index:999998;' +
             'background:rgba(0,0,0,0.9);color:#0f0;font:10px/1.3 monospace;' +
-            'max-width:420px;max-height:200px;overflow-y:auto;' +
+            'max-width:420px;max-height:220px;overflow-y:auto;' +
             'padding:4px 6px;border:1px solid #333;border-radius:4px 0 0 0;' +
             'opacity:0.88;white-space:pre-wrap;word-break:break-all;' +
             'pointer-events:auto;';
-        _vpnPanel.innerHTML = '<b style="color:#ff0">VPN Debug</b> | <span id="__vpnCoreStatus" style="color:#f00">CORE: ?</span> | <span id="__vpnConnStatus" style="color:#f00">VPN: ?</span>\n';
+        // Get VPN log path
+        var logPath = 'unknown';
+        try {
+            var app = require('electron').app || require('electron').remote.app;
+            var path = require('path');
+            logPath = path.join(app.getPath('appData'), 'Gudao', 'vpn_debug.log');
+        } catch(e) {}
+        _vpnPanel.innerHTML = '<b style="color:#ff0">VPN Debug</b> | <span id="__vpnCoreStatus" style="color:#f00">CORE: ?</span> | <span id="__vpnConnStatus" style="color:#f00">VPN: ?</span>\n' +
+            '<span style="color:#888;font-size:9px">Log file: ' + logPath + '</span>\n';
         document.body.appendChild(_vpnPanel);
     }
 
