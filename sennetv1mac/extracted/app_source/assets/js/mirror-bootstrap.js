@@ -1,25 +1,18 @@
 /**
- * mirror-bootstrap.js — v10 MINIMAL cho SENNET VPN macOS
+ * mirror-bootstrap.js — v14-DEBUG cho SENNET VPN macOS
  * ==================================================================
- * VERSION: v10-MINIMAL (2026-07-21)
+ * VERSION: v14-DEBUG (2026-07-21)
  *
- * TRIỆT ĐỂ THAY ĐỔI so với v9:
- *   1. 🔑 SET DEFAULT APP_API_URL nếu chưa có — ĐÂY LÀ FIX CHÍNH
- *      → App cần biết panel URL để gọi API. Không có = treo loading.
- *   2. ⚡ FETCH INTERCEPTOR SIÊU ĐƠN GIẢN — chỉ thêm header, không đụng response
- *      → Không clone(), không text(), không mirror retry, không error handler
- *      → Fix lỗi treo do response.clone() hoặc text() trên Mac
- *   3. 🔄 DEVICE REPORTING — poll localStorage mỗi 3s để detect token sau login
- *      → Không cần đọc response body
- *   4. 🛡️ UPDATE DIALOG BLOCKER — CSS + MutationObserver (giữ từ v9)
- *   5. 🌐 AXIOS INTERCEPTORS — mirror retry (giữ từ v9, không gây vấn đề)
+ * THAY ĐỔI so với v10:
+ *   1. 🖥️ VPN DEBUG PANEL — hiển thị trạng thái VPN (core status, connection)
+ *   2. 📡 IPC LISTENERS — bắt coreStatus, statusJS, applog từ main process
+ *   3. 🔧 VPN ERROR DETECTION — hiển thị lỗi khi libcore không start được
  *
- * Chức năng:
- *   - HWID Generator (MAC-{hostname}-{hash})
+ * Giữ nguyên từ v10:
  *   - Default APP_API_URL = https://kio.senviet.us
  *   - x-hwid header trên mọi fetch request
- *   - Auto device report khi phát hiện login qua localStorage polling
- *   - Update dialog blocker
+ *   - Auto device report qua localStorage polling
+ *   - Update dialog blocker (CSS + MutationObserver)
  *   - Axios mirror retry (dự phòng)
  * ==================================================================
  */
@@ -517,6 +510,90 @@
     }
 
     // ============================================================
+    // 🖥️ VPN DEBUG PANEL — Hiển thị trạng thái VPN
+    // ============================================================
+
+    var _vpnLogs = [];
+    var _MAX_VPN_LOGS = 50;
+    var _vpnPanel = null;
+
+    function vpnLog(msg, color) {
+        console.log('[VPN] ' + msg);
+        _vpnLogs.push({ time: new Date().toISOString().substring(11, 23), msg: msg, color: color || '#0f0' });
+        if (_vpnLogs.length > _MAX_VPN_LOGS) _vpnLogs.shift();
+        updateVpnPanel();
+    }
+
+    function createVpnPanel() {
+        if (_vpnPanel) return;
+        _vpnPanel = document.createElement('div');
+        _vpnPanel.id = '__vpnDebugPanel';
+        _vpnPanel.style.cssText = 'position:fixed;bottom:0;right:0;z-index:999998;' +
+            'background:rgba(0,0,0,0.9);color:#0f0;font:10px/1.3 monospace;' +
+            'max-width:420px;max-height:200px;overflow-y:auto;' +
+            'padding:4px 6px;border:1px solid #333;border-radius:4px 0 0 0;' +
+            'opacity:0.88;white-space:pre-wrap;word-break:break-all;' +
+            'pointer-events:auto;';
+        _vpnPanel.innerHTML = '<b style="color:#ff0">VPN Debug</b> | <span id="__vpnCoreStatus" style="color:#f00">CORE: ?</span> | <span id="__vpnConnStatus" style="color:#f00">VPN: ?</span>\n';
+        document.body.appendChild(_vpnPanel);
+    }
+
+    function updateVpnPanel() {
+        if (!_vpnPanel) return;
+        var html = '<b style="color:#ff0">VPN Debug</b> | <span id="__vpnCoreStatus">CORE: </span> | <span id="__vpnConnStatus">VPN: </span>\n';
+        // Show last 18 entries
+        var start = Math.max(0, _vpnLogs.length - 18);
+        for (var i = start; i < _vpnLogs.length; i++) {
+            var entry = _vpnLogs[i];
+            html += '<span style="color:' + entry.color + '">' + entry.time + ' ' + entry.msg + '</span>\n';
+        }
+        _vpnPanel.innerHTML = html;
+        _vpnPanel.scrollTop = _vpnPanel.scrollHeight;
+    }
+
+    function setupVpnIpcListeners() {
+        try {
+            var ipcRenderer = require('electron').ipcRenderer;
+            if (!ipcRenderer) {
+                vpnLog('ipcRenderer not available', '#f00');
+                return;
+            }
+            vpnLog('IPC listener installed', '#0f0');
+
+            // Core status (sing-box started/stopped)
+            ipcRenderer.on('coreStatus', function (event, status) {
+                vpnLog('Core ' + (status === 'true' ? 'STARTED' : 'STOPPED'), status === 'true' ? '#0f0' : '#f80');
+            });
+
+            // VPN connection status
+            ipcRenderer.on('statusJS', function (event, status) {
+                vpnLog('VPN ' + (status === 'true' ? 'CONNECTED' : 'DISCONNECTED'), status === 'true' ? '#0f0' : '#f80');
+            });
+
+            // Sing-box log output
+            ipcRenderer.on('applog', function (event, data) {
+                var msg = String(data).substring(0, 200);
+                // Highlight errors
+                var color = (msg.indexOf('error') !== -1 || msg.indexOf('fail') !== -1 || msg.indexOf('err') !== -1) ? '#f00' : '#888';
+                vpnLog('SING: ' + msg, color);
+            });
+
+            // App exit
+            ipcRenderer.on('appExit', function () {
+                vpnLog('App exit signal', '#f80');
+            });
+
+            // V2Ray general log
+            ipcRenderer.on('V2Ray-log', function (event, msg) {
+                vpnLog('LOG: ' + msg, '#aaa');
+            });
+
+        } catch (e) {
+            vpnLog('IPC setup error: ' + e.message, '#f00');
+        }
+    }
+
+    // ============================================================
     // MAIN INIT
     // ============================================================
     // CRITICAL: Các phần quan trọng (set APP_API_URL, cài fetch interceptor)
@@ -547,7 +624,7 @@
     }
 
     function initDeferred() {
-        console.log('[MirrorBootstrap v10] === DEFERRED INIT START ===');
+        console.log('[MirrorBootstrap v14] === DEFERRED INIT START ===');
 
         // 5. Block update dialogs (cần document.head và document.body)
         blockUpdateDialog();
@@ -558,7 +635,45 @@
         // 7. Monitor Vue mounting
         setTimeout(checkVueMounted, 3000);
 
-        console.log('[MirrorBootstrap v10] === DEFERRED INIT DONE ===');
+        // 8. 🖥️ VPN Debug Panel (cần document.body)
+        try {
+            createVpnPanel();
+            setupVpnIpcListeners();
+            vpnLog('VPN Debug Panel ready', '#ff0');
+            // Check if libcore exists
+            try {
+                var fs = require('fs');
+                var path = require('path');
+                var electron = require('electron');
+                var app = electron.app || electron.remote.app;
+                var appData = app.getPath('appData');
+                var libcorePath = path.join(appData, 'Gudao', 'libcore');
+                if (fs.existsSync(libcorePath)) {
+                    vpnLog('libcore FOUND at: ' + libcorePath, '#0f0');
+                    try {
+                        fs.accessSync(libcorePath, fs.constants.X_OK);
+                        vpnLog('libcore is executable', '#0f0');
+                    } catch (e) {
+                        vpnLog('libcore NOT executable: ' + e.message, '#f00');
+                    }
+                } else {
+                    vpnLog('libcore MISSING: ' + libcorePath, '#f00');
+                    // Check Resources/extra
+                    var resPath = path.join(process.cwd(), 'resources', 'extra', 'libcore');
+                    if (fs.existsSync(resPath)) {
+                        vpnLog('libcore found in Resources: ' + resPath, '#0f0');
+                    } else {
+                        vpnLog('libcore also missing from Resources: ' + resPath, '#f00');
+                    }
+                }
+            } catch (e) {
+                vpnLog('libcore check error: ' + e.message, '#f00');
+            }
+        } catch (e) {
+            console.log('[MirrorBootstrap v14] VPN panel error: ' + e.message);
+        }
+
+        console.log('[MirrorBootstrap v14] === DEFERRED INIT DONE ===');
     }
 
     // CHẠY CRITICAL PARTS NGAY LẬP TỨC (SYNCHRONOUS)

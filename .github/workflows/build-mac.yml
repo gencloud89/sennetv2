@@ -122,29 +122,18 @@ jobs:
           # Copy Frameworks
           cp -r /tmp/electron-arm64/Electron.app/Contents/Frameworks/* "${APP_BUNDLE}/Contents/Frameworks/" 2>/dev/null || true
 
-      - name: Build sing-box for macOS ARM64
+      - name: Download sing-box for macOS ARM64
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET.app"
-
-          # Build sing-box từ source (nếu có)
-          if [ -d "../sing-box" ]; then
-            echo "Building sing-box from source..."
-            cd ../sing-box
-            CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -o ../sennetv1mac/bin/libcore-darwin-arm64 ./cmd/sing-box
-            cd ../sennetv1mac
-          fi
-
-          # Copy native binary nếu có
-          if [ -f "bin/libcore-darwin-arm64" ]; then
-            cp bin/libcore-darwin-arm64 "${APP_BUNDLE}/Contents/Resources/extra/libcore"
-            cp bin/libcore-darwin-arm64 "${APP_BUNDLE}/Contents/Resources/extra/libcore_backup"
-            chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
-            echo "libcore copied for ARM64"
-          else
-            echo "WARNING: libcore-darwin-arm64 not found — VPN core will not work"
-            echo "Place sing-box binary at sennetv1mac/bin/libcore-darwin-arm64"
-          fi
+          SINGBOX_VER="1.11.0"
+          SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-darwin-arm64.tar.gz"
+          echo "Downloading sing-box v${SINGBOX_VER} for macOS ARM64..."
+          curl -L --connect-timeout 30 --max-time 120 -o /tmp/sing-box-arm64.tar.gz "${SINGBOX_URL}"
+          tar -xzf /tmp/sing-box-arm64.tar.gz -C /tmp/
+          cp /tmp/sing-box-${SINGBOX_VER}-darwin-arm64/sing-box "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+          chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+          echo "sing-box v${SINGBOX_VER} installed as libcore ($(wc -c < "${APP_BUNDLE}/Contents/Resources/extra/libcore") bytes)"
 
       - name: Strip Electron — AN TOÀN, không phá hủy app bundle
         run: |
@@ -300,19 +289,18 @@ jobs:
           chmod +x "${APP_BUNDLE}/Contents/MacOS/SENNET"
           cp -r /tmp/electron-x64/Electron.app/Contents/Frameworks/* "${APP_BUNDLE}/Contents/Frameworks/" 2>/dev/null || true
 
-      - name: Build sing-box for macOS x64
+      - name: Download sing-box for macOS x64
         run: |
           cd sennetv1mac
           APP_BUNDLE="output/SENNET_x64.app"
-          if [ -d "../sing-box" ]; then
-            cd ../sing-box
-            CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -o ../sennetv1mac/bin/libcore-darwin-amd64 ./cmd/sing-box
-            cd ../sennetv1mac
-          fi
-          if [ -f "bin/libcore-darwin-amd64" ]; then
-            cp bin/libcore-darwin-amd64 "${APP_BUNDLE}/Contents/Resources/extra/libcore"
-            chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
-          fi
+          SINGBOX_VER="1.11.0"
+          SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-darwin-amd64.tar.gz"
+          echo "Downloading sing-box v${SINGBOX_VER} for macOS x64..."
+          curl -L --connect-timeout 30 --max-time 120 -o /tmp/sing-box-x64.tar.gz "${SINGBOX_URL}"
+          tar -xzf /tmp/sing-box-x64.tar.gz -C /tmp/
+          cp /tmp/sing-box-${SINGBOX_VER}-darwin-amd64/sing-box "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+          chmod +x "${APP_BUNDLE}/Contents/Resources/extra/libcore"
+          echo "sing-box v${SINGBOX_VER} installed as libcore ($(wc -c < "${APP_BUNDLE}/Contents/Resources/extra/libcore") bytes)"
 
       - name: Strip unnecessary Electron files (giảm dung lượng, AN TOÀN)
         run: |
