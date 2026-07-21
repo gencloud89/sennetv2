@@ -412,68 +412,79 @@ const logger = tracer.console({
         .write(_0x94d5c.output + '\n', 'utf8')
   },
 })
-function setProxy(_0x8f8ad7) {
-  if (isMac) {
-    // macOS: dùng networksetup để set/tắt system proxy
-    // Lấy tên network service (thường là Wi-Fi hoặc Ethernet)
-    var networkService = 'Wi-Fi'
-    try {
-      var services = cps.execSync('networksetup -listallnetworkservices', { encoding: 'utf8' })
-      var lines = services.split('\n').filter(function (l) { return l.trim().length > 0 && l.indexOf('*') === -1 })
-      for (var i = 0; i < lines.length; i++) {
-        var s = lines[i].trim()
-        if (s.indexOf('Wi-Fi') !== -1 || s.indexOf('Ethernet') !== -1 || s.indexOf('USB') !== -1) {
-          networkService = s
-          break
+// Lấy danh sách ACTIVE network services (theo thứ tự ưu tiên)
+function getActiveNetworkServices() {
+  var services = []
+  try {
+    // Dùng listnetworkserviceorder — hiển thị services theo thứ tự ưu tiên
+    var output = cps.execSync('networksetup -listnetworkserviceorder', { encoding: 'utf8' })
+    var lines = output.split('\n')
+    for (var i = 0; i < lines.length; i++) {
+      var match = lines[i].match(/^\(\d+\)\s+(.+)$/)
+      if (match) {
+        var svc = match[1].trim()
+        // Lọc bỏ services không phải network thực (Bluetooth, FireWire, etc.)
+        if (svc && svc.indexOf('*') === -1 && svc !== 'Bluetooth' && svc.indexOf('Bluetooth') === -1 &&
+            svc.indexOf('FireWire') === -1 && svc.indexOf('Thunderbolt Bridge') === -1) {
+          services.push(svc)
         }
       }
-      if (lines.length > 1 && networkService === 'Wi-Fi') networkService = lines[1].trim()
-      logger.info('proxy: detected network service: ' + networkService)
-    } catch (e) {
-      networkService = 'Wi-Fi'
-      logger.info('proxy: failed to detect network service, using Wi-Fi: ' + e.message)
     }
+  } catch (e) {}
+  if (services.length === 0) services.push('Wi-Fi')
+  logger.info('proxy: active services: ' + JSON.stringify(services))
+  return services
+}
+
+function setProxy(_0x8f8ad7) {
+  if (isMac) {
+    // Lấy TẤT CẢ active network services
+    var networkServices = getActiveNetworkServices()
+    // Chỉ dùng service CHÍNH (đầu tiên = priority cao nhất)
+    var primaryService = networkServices[0] || 'Wi-Fi'
 
     if (_0x8f8ad7) {
-      // Bật proxy HTTP + HTTPS + SOCKS — dùng sudo vì networksetup cần quyền admin trên macOS
-      var proxyOnCmd = 'networksetup -setwebproxy "' + networkService + '" 127.0.0.1 10090 && ' +
-        'networksetup -setsecurewebproxy "' + networkService + '" 127.0.0.1 10090 && ' +
-        'networksetup -setsocksfirewallproxy "' + networkService + '" 127.0.0.1 10090'
-      console.log('proxy: Mac proxy ON via ' + networkService)
-      logger.info('proxy: Mac proxy ON cmd: ' + proxyOnCmd)
-      vpnLogToFile('PROXY ON cmd: ' + proxyOnCmd)
-      vpnLogToFile('PROXY ON networkService: ' + networkService)
-      // DÙNG SUDO — networksetup cần admin trên macOS
-      sudo.exec(proxyOnCmd, { name: 'SENNET VPN Proxy' }, function (err, stdout, stderr) {
+      // Bật proxy — áp dụng cho TẤT CẢ services
+      var cmds = []
+      for (var i = 0; i < networkServices.length; i++) {
+        var svc = networkServices[i]
+        cmds.push('networksetup -setwebproxy "' + svc + '" 127.0.0.1 10090')
+        cmds.push('networksetup -setsecurewebproxy "' + svc + '" 127.0.0.1 10090')
+        cmds.push('networksetup -setsocksfirewallproxy "' + svc + '" 127.0.0.1 10090')
+      }
+      var proxyOnCmd = cmds.join(' && ')
+      console.log('proxy: Mac proxy ON (' + networkServices.length + ' services, primary: ' + primaryService + ')')
+      logger.info('proxy: Mac proxy ON: ' + proxyOnCmd)
+      vpnLogToFile('PROXY ON (' + networkServices.length + ' services): ' + primaryService)
+      sudo.exec(proxyOnCmd, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
         if (err || stderr) {
           var errMsg = 'PROXY ON ERROR: ' + (err ? err.message || err : stderr)
-          logger.info(errMsg)
-          vpnLogToFile(errMsg)
+          logger.info(errMsg); vpnLogToFile(errMsg)
           webContentsSend('applog', 'PROXY ERROR: ' + (err ? err.message || err : stderr))
         } else {
-          var okMsg = 'PROXY ON OK: ' + (stdout || 'no output').trim()
-          logger.info(okMsg)
-          vpnLogToFile(okMsg)
+          var okMsg = 'PROXY ON OK (' + networkServices.length + ' services)'
+          logger.info(okMsg); vpnLogToFile(okMsg)
         }
       })
     } else {
-      // Tắt proxy — dùng sudo
-      var proxyOffCmd = 'networksetup -setwebproxystate "' + networkService + '" off && ' +
-        'networksetup -setsecurewebproxystate "' + networkService + '" off && ' +
-        'networksetup -setsocksfirewallproxystate "' + networkService + '" off'
-      console.log('proxy: Mac proxy OFF via ' + networkService)
-      logger.info('proxy: Mac proxy OFF cmd: ' + proxyOffCmd)
-      vpnLogToFile('PROXY OFF cmd: ' + proxyOffCmd)
-      // DÙNG SUDO — networksetup cần admin trên macOS
-      sudo.exec(proxyOffCmd, { name: 'SENNET VPN Proxy' }, function (err, stdout, stderr) {
+      // Tắt proxy — cho TẤT CẢ services
+      var offCmds = []
+      for (var j = 0; j < networkServices.length; j++) {
+        var svc2 = networkServices[j]
+        offCmds.push('networksetup -setwebproxystate "' + svc2 + '" off')
+        offCmds.push('networksetup -setsecurewebproxystate "' + svc2 + '" off')
+        offCmds.push('networksetup -setsocksfirewallproxystate "' + svc2 + '" off')
+      }
+      var proxyOffCmd = offCmds.join(' && ')
+      console.log('proxy: Mac proxy OFF (' + networkServices.length + ' services)')
+      logger.info('proxy: Mac proxy OFF: ' + proxyOffCmd)
+      vpnLogToFile('PROXY OFF (' + networkServices.length + ' services)')
+      sudo.exec(proxyOffCmd, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
         if (err || stderr) {
           var errMsg = 'PROXY OFF ERROR: ' + (err ? err.message || err : stderr)
-          logger.info(errMsg)
-          vpnLogToFile(errMsg)
+          logger.info(errMsg); vpnLogToFile(errMsg)
         } else {
-          var okMsg = 'PROXY OFF OK: ' + (stdout || 'no output').trim()
-          logger.info(okMsg)
-          vpnLogToFile(okMsg)
+          logger.info('PROXY OFF OK'); vpnLogToFile('PROXY OFF OK')
         }
       })
     }
@@ -581,7 +592,31 @@ async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
   const _0x3c818b = '"' + _0x2f9277 + '" run -D "' + appConfigDir + '"'
   vpnLogToFile('startClashProcess: ' + _0x3c818b)
   logger.info('run: ' + _0x3c818b)
-  sudo.exec(_0x3c818b, { name: 'My App' })
+  // Mac: GỘP start libcore + set proxy sau 3s trong 1 sudo call
+  if (isMac) {
+    var services = getActiveNetworkServices()
+    var combined = _0x3c818b + ' & PID=$!; sleep 3; '
+    for (var i = 0; i < services.length; i++) {
+      var svc = services[i]
+      combined += 'networksetup -setwebproxy "' + svc + '" 127.0.0.1 10090 && '
+      combined += 'networksetup -setsecurewebproxy "' + svc + '" 127.0.0.1 10090 && '
+      combined += 'networksetup -setsocksfirewallproxy "' + svc + '" 127.0.0.1 10090 && '
+    }
+    combined += 'echo PROXY_OK; wait $PID'
+    vpnLogToFile('VPN ON combined (' + services.length + ' services)')
+    logger.info('VPN ON combined: ' + combined)
+    sudo.exec(combined, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+      if (err || stderr) {
+        var errMsg = 'VPN ON ERROR: ' + (err ? err.message || err : stderr)
+        logger.info(errMsg); vpnLogToFile(errMsg)
+        webContentsSend('applog', 'VPN ERROR: ' + (err ? err.message || err : stderr))
+      } else {
+        var okMsg = 'VPN ON OK (' + services.length + ' services): ' + (stdout || '').trim().substring(0, 100)
+        logger.info(okMsg); vpnLogToFile(okMsg)
+      }
+    })
+  }
+  // Vẫn chạy non-sudo instance để monitor stdout/stderr
   coreServer = cps.exec(_0x3c818b)
   vpnLogToFile('coreServer pid: ' + (coreServer ? coreServer.pid : 'null'))
   coreServer.stdout.on('data', (_0x4ebb8f) => {
@@ -624,12 +659,28 @@ async function startClashProcess(_0xb3c1ee, _0x4ec26e) {
 function NotTunkillCoreProcess() {
   return new Promise((_0xb3107a) => {
     if (isMac) {
-      // Mac: dùng pkill để kill process theo tên
-      try {
-        cps.execSync('pkill -f libcore 2>/dev/null || true', { encoding: 'utf8' })
-      } catch (e) {
-        // pkill trả về lỗi nếu không tìm thấy process — bỏ qua
+      // Mac: GỘP kill + tắt proxy trong 1 lần sudo → GIẢM password prompt
+      var services = getActiveNetworkServices()
+      var combined = 'pkill -f libcore 2>/dev/null || true'
+      for (var i = 0; i < services.length; i++) {
+        var svc = services[i]
+        combined += '; networksetup -setwebproxystate "' + svc + '" off'
+        combined += '; networksetup -setsecurewebproxystate "' + svc + '" off'
+        combined += '; networksetup -setsocksfirewallproxystate "' + svc + '" off'
       }
+      vpnLogToFile('VPN OFF combined (' + services.length + ' services)')
+      logger.info('VPN OFF combined: ' + combined)
+      sudo.exec(combined, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
+        if (err || stderr) {
+          var errMsg = 'VPN OFF ERROR: ' + (err ? err.message || err : stderr)
+          logger.info(errMsg); vpnLogToFile(errMsg)
+        } else {
+          vpnLogToFile('VPN OFF OK'); logger.info('VPN OFF OK')
+        }
+        coreServer != null &&
+          (console.log('Kill Core:' + coreServer.pid), coreServer.kill())
+        setTimeout(() => _0xb3107a(), 1000)
+      })
     } else {
       // Windows: dùng taskkill
       let _0x5d4efd = 'cmd /k taskkill /f /im libcore.exe'
