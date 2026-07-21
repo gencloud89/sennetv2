@@ -94,84 +94,91 @@ function vpnLogToFile(msg) {
 // ============================================================
 // PRIVILEGED SESSION — 1 sudo prompt cho TOÀN BỘ phiên app
 // ============================================================
-// Dùng FIFO pipe: root shell chạy ngầm, nhận lệnh qua pipe.
+// Dùng file-based command queue: root shell poll file mỗi 0.5s.
+// execRoot ghi lệnh vào file không chặn (non-blocking).
 // Chỉ prompt password MỘT LẦN khi mở app.
 
-var _vpnFifo = isMac ? path.join(appConfigDir, 'vpn_cmd_fifo') : null
+var _vpnCmdFile = isMac ? path.join(appConfigDir, 'vpn_cmd.sh') : null
 var _vpnRootReady = false
 var _vpnPendingCallbacks = []
 
 function execRoot(cmd, callback) {
   if (!isMac) {
-    // Windows fallback
+    // Windows: dùng cps.exec trực tiếp (cần admin context)
     cps.exec(cmd, callback)
     return
   }
+  var safeCmd = cmd.replace(/'/g, "'\\''")
+  var fullScript = '#!/bin/sh\n' + safeCmd + '\n'
+  var tmpFile = _vpnCmdFile + '.tmp'
+
   if (_vpnRootReady) {
     try {
-      // Escape single quotes: replace ' with '\''
-      var safeCmd = cmd.replace(/'/g, "'\\''")
-      fs.appendFileSync(_vpnFifo, "echo '===CMD_START==='; " + safeCmd + "; echo '===CMD_END===' \n")
+      // Ghi vào file tmp rồi rename atomic (không block)
+      fs.writeFileSync(tmpFile, fullScript, 'utf8')
+      fs.renameSync(tmpFile, _vpnCmdFile)
       vpnLogToFile('execRoot: ' + cmd.substring(0, 150))
     } catch (e) {
-      vpnLogToFile('execRoot FIFO write error: ' + e.message)
+      vpnLogToFile('execRoot write error: ' + e.message)
     }
-    // Callback fires immediately (fire-and-forget)
-    if (callback) setTimeout(callback, 500)
+    if (callback) setTimeout(callback, 1000)
   } else {
-    // FIFO chưa sẵn sàng — queue lại
-    vpnLogToFile('execRoot QUEUED (root not ready): ' + cmd.substring(0, 100))
+    // Root shell chưa sẵn sàng — queue
+    vpnLogToFile('execRoot QUEUED: ' + cmd.substring(0, 100))
     _vpnPendingCallbacks.push({ cmd: cmd, cb: callback })
   }
 }
 
 function setupPrivilegedSession() {
   if (!isMac) return
-  vpnLogToFile('=== Setting up privileged session (1 password) ===')
+  vpnLogToFile('=== Privileged session setup (1 password only) ===')
 
-  // Tạo FIFO
-  try {
-    cps.execSync('rm -f "' + _vpnFifo + '" && mkfifo "' + _vpnFifo + '"', { encoding: 'utf8' })
-    vpnLogToFile('FIFO created: ' + _vpnFifo)
-  } catch (e) {
-    vpnLogToFile('FIFO create error: ' + e.message)
-    return
-  }
+  // Root shell loop: poll file mỗi 0.5s, thực thi nếu có lệnh
+  var loopScript =
+    'CMD=' + _vpnCmdFile + '; ' +
+    'echo "root-shell-started"; ' +
+    'while true; do ' +
+    '  if [ -f "$CMD" ]; then ' +
+    '    mv "$CMD" "$CMD.exec" 2>/dev/null; ' +
+    '    sh "$CMD.exec" 2>&1; ' +
+    '    rm -f "$CMD.exec"; ' +
+    '  fi; ' +
+    '  sleep 0.5; ' +
+    'done'
 
-  // Root shell loop đọc lệnh từ FIFO — 1 sudo prompt duy nhất
-  var loopScript = 'while true; do /bin/sh "' + _vpnFifo + '" 2>&1; done'
-  logger.info('Starting privileged session...')
-  vpnLogToFile('Starting root shell: ' + loopScript)
+  logger.info('Starting privileged session (1 password prompt)...')
+  vpnLogToFile('Root shell script: ' + loopScript)
 
   sudo.exec(loopScript, { name: 'SENNET VPN' }, function (err, stdout, stderr) {
     if (err) {
-      vpnLogToFile('Root shell exited: ' + (err.message || err))
-      _vpnRootReady = false
+      vpnLogToFile('Root shell ERROR: ' + (err.message || err))
+    } else {
+      vpnLogToFile('Root shell exited normally')
     }
+    _vpnRootReady = false
   })
 
-  // Đánh dấu ready sau 1 giây (đủ để sudo prompt hiện và user nhập pass)
+  // Đợi 3s cho user nhập password, sau đó đánh dấu ready
   setTimeout(function () {
     _vpnRootReady = true
-    vpnLogToFile('Root shell READY — executing queued commands')
-    // Xử lý các lệnh đang chờ
+    vpnLogToFile('Root shell READY (' + _vpnPendingCallbacks.length + ' queued commands)')
     for (var i = 0; i < _vpnPendingCallbacks.length; i++) {
       var pending = _vpnPendingCallbacks[i]
       execRoot(pending.cmd, pending.cb)
     }
     _vpnPendingCallbacks = []
-  }, 2000)
+  }, 3000)
 }
 
 function cleanupPrivilegedSession() {
-  if (!isMac || !_vpnFifo) return
+  if (!isMac || !_vpnCmdFile) return
   vpnLogToFile('Cleaning up privileged session')
+  // Gửi lệnh exit
+  execRoot('exit 0')
   try {
-    // Gửi lệnh exit để root shell thoát
-    fs.appendFileSync(_vpnFifo, 'exit 0\n')
-  } catch (e) {}
-  try {
-    cps.execSync('rm -f "' + _vpnFifo + '"')
+    fs.unlinkSync(_vpnCmdFile)
+    fs.unlinkSync(_vpnCmdFile + '.exec')
+    fs.unlinkSync(_vpnCmdFile + '.tmp')
   } catch (e) {}
   _vpnRootReady = false
 }
