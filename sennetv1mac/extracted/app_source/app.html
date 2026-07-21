@@ -79,17 +79,17 @@
 <script src="assets/js/axios.min.js"></script>
 <script src="assets/js/encrypt.js"></script>
 <script src="assets/js/index.min.js"></script>
-<!-- MIRROR-BOOTSTRAP DISABLED FOR DEBUG -->
-<!-- <script src="assets/js/mirror-bootstrap.js"></script> -->
+<!-- FIX: Electron remote shim cho Mac — phải chạy TRƯỚC mirror-bootstrap và app.js -->
 <script>
-  // === v12-FIX: Remote shim + Debug overlay ===
+  // ============================================================
+  // v13 PRODUCTION: Remote module shim cho Mac Electron 28
+  // ============================================================
+  // app.js gọi require('electron').remote.getCurrentWindow()
+  // Nhưng trên Mac Electron 28, remote module bị undefined.
+  // Shim này wrap window.require để tự động thêm remote object
+  // vào electron module nếu nó bị thiếu.
+  // ============================================================
   (function() {
-
-    // ============================================================
-    // FIX: Shim require('electron').remote cho Mac Electron 28
-    // App.js goi remote.getCurrentWindow() nhung remote bi undefined
-    // tren Mac. Shim nay tao remote object gia truoc khi app.js load.
-    // ============================================================
     try {
       var _origRequire = window.require;
       window.require = function(name) {
@@ -113,95 +113,11 @@
             shell: mod.shell,
             require: _origRequire
           };
-          console.log('[v12-FIX] Electron remote shim installed');
         }
         return mod;
       };
-    } catch(e) {
-      console.log('[v12-FIX] Remote shim ERROR:', e.message);
-    }
-
-    // ============================================================
-    // DEBUG OVERLAY — hiển thị API calls trên màn hình
-    // ============================================================
-    var panel = document.createElement('div');
-    panel.id = '__debugPanel';
-    panel.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;' +
-      'background:#1a1a2e;color:#0f0;font:11px/1.4 monospace;max-height:55vh;overflow-y:auto;' +
-      'padding:8px;border-bottom:2px solid #0f0;opacity:0.92;white-space:pre-wrap;word-break:break-all;';
-    panel.innerHTML = '<b style="color:#ff0">=== SENNET v12-FIX (remote shim) ===</b>\n';
-    document.documentElement.appendChild(panel);
-
-    function panelLog(msg, color) {
-      var line = document.createElement('div');
-      line.style.cssText = 'color:' + (color || '#0f0') + ';margin:1px 0;';
-      line.textContent = new Date().toISOString().substring(11, 23) + ' ' + msg;
-      panel.appendChild(line);
-      panel.scrollTop = panel.scrollHeight;
-      console.log('[v12] ' + msg);
-    }
-
-    panelLog('Remote shim ACTIVE', '#ff0');
-    panelLog('User-Agent: ' + navigator.userAgent, '#aaa');
-
-    // ---- localStorage ----
-    try {
-      localStorage.setItem('__v12_test__', '1');
-      localStorage.removeItem('__v12_test__');
-      panelLog('localStorage: OK', '#0f0');
-
-      var apiUrl = localStorage.getItem('APP_API_URL');
-      panelLog('APP_API_URL=' + (apiUrl || '(EMPTY)'), apiUrl ? '#0f0' : '#f00');
-      if (!apiUrl || apiUrl.length < 5) {
-        localStorage.setItem('APP_API_URL', 'https://kio.senviet.us');
-        panelLog('SET APP_API_URL=https://kio.senviet.us', '#ff0');
-      }
-    } catch(e) {
-      panelLog('localStorage ERROR: ' + e.message, '#f00');
-    }
-
-    // ---- Network test ----
-    panelLog('Test network to host.php...', '#aaa');
-    var testXhr = new XMLHttpRequest();
-    testXhr.open('GET', 'https://appsenviet.htb991.space/host.php', true);
-    testXhr.timeout = 10000;
-    testXhr.onload = function() {
-      panelLog('host.php: HTTP ' + testXhr.status + ' ' + testXhr.responseText.substring(0, 120), testXhr.status === 200 ? '#0f0' : '#f00');
-    };
-    testXhr.onerror = function() { panelLog('host.php: NETWORK ERROR', '#f00'); };
-    testXhr.ontimeout = function() { panelLog('host.php: TIMEOUT', '#f00'); };
-    try { testXhr.send(); } catch(e) { panelLog('host.php send ERROR: ' + e.message, '#f00'); }
-
-    // ---- Fetch logger (pass-through) ----
-    var _orig = window.fetch;
-    var _fc = 0;
-    window.fetch = function(input, init) {
-      _fc++;
-      var id = _fc;
-      var url = '';
-      try { url = typeof input === 'string' ? input : (input && input.url ? input.url : ''); } catch(e) {}
-      var s = url.length > 120 ? url.substring(0, 120) + '...' : url;
-      panelLog('FETCH#' + id + ' >> ' + (s || '(empty)'), '#88f');
-
-      var t0 = Date.now();
-      return _orig.call(this, input, init).then(function(r) {
-        panelLog('FETCH#' + id + ' << ' + r.status + ' ' + (Date.now()-t0) + 'ms', r.ok ? '#0f0' : '#f80');
-        return r;
-      }, function(e) {
-        panelLog('FETCH#' + id + ' !!ERR ' + (e.message || e), '#f00');
-        return Promise.reject(e);
-      });
-    };
-
-    // ---- Error handlers ----
-    window.addEventListener('unhandledrejection', function(e) {
-      panelLog('UNHANDLED REJECTION: ' + (e.reason ? (e.reason.message || e.reason) : 'unknown'), '#f00');
-    });
-    window.addEventListener('error', function(e) {
-      panelLog('GLOBAL ERROR: ' + e.message, '#f00');
-    });
-
-    panelLog('Waiting for app.js to load...', '#ff0');
+    } catch(e) {}
   })();
 </script>
+<script src="assets/js/mirror-bootstrap.js"></script>
 <script src="assets/js/app.js?202305"></script>
